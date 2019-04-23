@@ -38,7 +38,7 @@ class NAIS_Database(object):
     Build PostgreSQL database of NAIS point data.
     '''
 
-    def __init__(self, zone, year):
+    def __init__(self, zone, year, password):
         # file parameters
         self.root = tempfile.mkdtemp()
         self.year = year
@@ -54,6 +54,7 @@ class NAIS_Database(object):
         self.min_speed = 2
 
         # table parameters
+        self.password = password
         self.columns = """
             MMSI char(9) CHECK (char_length(MMSI) = 9) NOT NULL,
             BaseDateTime timestamp NOT NULL,
@@ -166,7 +167,7 @@ class NAIS_Database(object):
         '''Build database of raw data.'''
         self.download_raw()
 
-        self.db = NAIS_Table(password, 'nais_points')
+        self.db = NAIS_Table(self.password, 'nais_points')
         self.db.drop_table()
         self.db.create_table(self.columns)
 
