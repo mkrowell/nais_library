@@ -184,7 +184,7 @@ class NAIS_Database(object):
 
         # Add derived fields
         self.add_sector()
-        self.add_track_id()
+        self.add_track()
         self.add_ROT()
 
         # Handle data types
@@ -273,7 +273,7 @@ class NAIS_Database(object):
         self.grid_df.drop_duplicates(inplace=True)
         self.grid_df.to_csv(self.grid_csv, index=False, header=False)
 
-    def add_track_id(self):
+    def add_track(self):
         '''Add track ID for each MMSI.'''
         self.df.sort_values(by=[
             'MMSI',
