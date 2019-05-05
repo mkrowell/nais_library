@@ -193,4 +193,3 @@ def extract_file(filepath, destination):
 # PACKAGE IMPORTS
 # ------------------------------------------------------------------------------
 from .database import *
-from .grid import *
