@@ -2,7 +2,7 @@
 library for working with NAIS data
 
 # Usage
-Create Postgres tables 
+Create Postgres tables from publicly available data. The AIS data is from https://marinecadastre.gov/.
 ```
 import nais_library as nais
 
