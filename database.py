@@ -15,6 +15,7 @@
 # ------------------------------------------------------------------------------
 import datetime
 from glob import glob
+import io
 import multiprocessing
 import numpy as np
 import os
@@ -24,12 +25,14 @@ import pandas as pd
 from postgis.psycopg import register
 import psycopg2
 from psycopg2 import sql
+import requests
 from retrying import retry
 import shutil
 import subprocess
 import tempfile
 import time
 import webbrowser
+import zipfile
 
 from . import download_url, extract_zip, find_file
 
@@ -49,6 +52,8 @@ class NAIS_Database(object):
         self.year = year
         self.zone = zone
         self.csv = None
+        self.grid_df = None
+        self.grid_csv = join(self.root, 'grid_table.csv')
 
         # spatial parameters
         self.lonMin = -126.
@@ -101,7 +106,7 @@ class NAIS_Database(object):
     def build_tables(self):
         '''Build database of raw data.'''
         start = time.time()
-        self.download_raw()
+        # self.download_raw()
 
         try:
             # Build shoreline table
@@ -133,15 +138,7 @@ class NAIS_Database(object):
 
             # Add PostGIS geometry and crete index for space and time
             self.table_points.add_geometry()
-            self.table_points.add_index()
-
-            # Create grid table
-            print('Constructing grid table...')
-            self.table_grid = Grid_Table(self.conn, 'grid')
-            self.table_grid.drop_table()
-            self.table_grid.copy_data(self.grid_csv)
-            self.table_grid.add_points()
-            self.table_grid.add_box()
+            self.table_points.add_indexes()
 
             # Create tracks table from points table
             print('Constructing nais_tracks table...')
@@ -150,6 +147,16 @@ class NAIS_Database(object):
             self.table_tracks.add_tracks()
             print('Removing tracks that cross shore...')
             self.table_tracks.reduce_table()
+
+            # Create grid table
+            print('Constructing grid table...')
+            self.grid_df.to_csv(self.grid_csv, index=False, header=False)
+            self.table_grid = Grid_Table(self.conn, 'grid')
+            self.table_grid.drop_table()
+            self.table_grid.create_table()
+            self.table_grid.copy_data(self.grid_csv)
+            self.table_grid.add_points()
+            self.table_grid.add_box()
 
         except Exception as err:
             print(err)
@@ -268,10 +275,6 @@ class NAIS_Database(object):
                 # Create grid dataframe
                 index_row = [min_lon, min_lat, max_lon, max_lat]
                 self.grid_df.loc[index] = index_row
-
-        self.grid_csv = join(self.root, 'grid_table.csv')
-        self.grid_df.drop_duplicates(inplace=True)
-        self.grid_df.to_csv(self.grid_csv, index=False, header=False)
 
     def add_track(self):
         '''Add track ID for each MMSI.'''
@@ -409,11 +412,7 @@ class TSS_Download(object):
         print('Downloading the TSS shapefile.')
         download = requests.get(self.url)
         zfile = zipfile.ZipFile(io.BytesIO(download.content))
-        # zfile.extractall(self.root)
-
-        # zfile = download_url(self.url, self.root, '.zip')
-        extract_zip(zfile, self.root)
-        os.remove(zfile)
+        zfile.extractall(self.root)
         return output
 
 class NAIS_Download(object):
@@ -514,7 +513,7 @@ class Postgres_Table(object):
         print('Adding index for {0}.'.format(field))
         index = """
             CREATE INDEX IF NOT EXISTS {0}
-            ON {1} USING GIST({2})
+            ON {1} ({2})
         """.format(name, self.table, field)
         self.cur.execute(index)
         self.conn.commit()
@@ -578,18 +577,17 @@ class Points_Table(Postgres_Table):
         self.cur.execute(add_geom)
         self.conn.commit()
 
-    def add_index(self):
+    def add_indexes(self):
         '''Add spatial, time, and MMSI indices.'''
-        self.add_index('idx_point', 'GIST(geom)')
-        self.add_index('idx_time', 'basedatetime')
-
-        print('Adding MMSI index.')
-        index_mmsi =  """
-            CREATE INDEX IF NOT EXISTS idx_mmsi
-            ON {0} (mmsi)
+        index =  """
+            CREATE INDEX IF NOT EXISTS idx_point
+            ON {0} USING GIST(geom)
         """.format(self.table)
-        self.cur.execute(index_mmsi)
+        self.cur.execute(index)
         self.conn.commit()
+
+        self.add_index('idx_mmsi', 'mmsi')
+        self.add_index('idx_time', 'basedatetime')
 
 class Tracks_Table(Postgres_Table):
 
@@ -636,9 +634,10 @@ class Tracks_Table(Postgres_Table):
         self.conn.commit()
 
     def reduce_table(self):
-        # Limit shore to Pacific region
+        # Limit tracks to those that don't cross the shoreline
         sql = """
-            DELETE FROM nais_tracks n, shore s
+            DELETE FROM nais_tracks AS n
+            USING shore AS s
             WHERE ST_Intersects(n.track, s.geom)
         """
         self.cur.execute(sql)
