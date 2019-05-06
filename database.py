@@ -99,6 +99,13 @@ class NAIS_Database(object):
             user='postgres',
             password=self.password)
 
+        # tables
+        self.table_shore = Shapefile_Table(self.conn, 'shore')
+        self.table_tss = Shapefile_Table(self.conn, 'tss')
+        self.table_points = Points_Table(self.conn, 'nais_points')
+        self.table_tracks = Tracks_Table(self.conn, 'nais_tracks')
+        self.table_grid = Grid_Table(self.conn, 'grid')
+
 
     # --------------------------------------------------------------------------
     # MAIN METHODS
@@ -111,20 +118,17 @@ class NAIS_Database(object):
         try:
             # Build shoreline table
             print('Constructing shoreline table...')
-            self.table_shore = Shapefile_Table(self.conn, 'shore')
             self.table_shore.drop_table()
             self.table_shore.create_table(filepath=self.shoreline_shp)
             self.table_shore.reduce_table()
 
             # Build shoreline table
             print('Constructing tss table...')
-            self.table_tss = Shapefile_Table(self.conn, 'tss')
             self.table_tss.drop_table()
             self.table_tss.create_table(filepath=self.tss_shp)
 
             # Build nais points table
             print('Constructing nais_points table...')
-            self.table_points = Points_Table(self.conn, 'nais_points')
             self.table_points.drop_table()
             self.table_points.create_table()
             self.table_points.set_timezone()
@@ -142,7 +146,6 @@ class NAIS_Database(object):
 
             # Create tracks table from points table
             print('Constructing nais_tracks table...')
-            self.table_tracks = Tracks_Table(self.conn, 'nais_tracks')
             self.table_tracks.drop_table()
             self.table_tracks.add_tracks()
             print('Removing tracks that cross shore...')
@@ -151,12 +154,10 @@ class NAIS_Database(object):
             # Create grid table
             print('Constructing grid table...')
             self.grid_df.to_csv(self.grid_csv, index=True, header=False)
-            self.table_grid = Grid_Table(self.conn, 'grid')
             self.table_grid.drop_table()
             self.table_grid.create_table()
             self.table_grid.copy_data(self.grid_csv)
             self.table_grid.add_points()
-            self.table_grid.add_box()
 
         except Exception as err:
             print(err)
@@ -678,23 +679,4 @@ class Grid_Table(Postgres_Table):
         """
         self.cur.execute(sql.format(self.table, 'minpoint', 'minlon', 'minlat'))
         self.cur.execute(sql.format(self.table, 'maxpoint', 'maxlon', 'maxlat'))
-        self.conn.commit()
-
-    def add_box(self):
-        '''Add PostGIS Box2D geometry to the database.'''
-        sql = """
-            ALTER TABLE {0}
-            ADD COLUMN {1} geometry(Box2D, 4326)
-        """
-        self.cur.execute(sql.format(self.table, 'box'))
-        self.conn.commit()
-
-        sql = """
-            UPDATE {0}
-            SET {1} = ST_SetSRID(
-                ST_Envelope({0},{1}),
-                4326
-            )
-        """
-        self.cur.execute(sql.format(self.table, 'box', 'minpoint', 'maxpoint'))
         self.conn.commit()
