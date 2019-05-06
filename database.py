@@ -150,7 +150,7 @@ class NAIS_Database(object):
 
             # Create grid table
             print('Constructing grid table...')
-            self.grid_df.to_csv(self.grid_csv, index=False, header=False)
+            self.grid_df.to_csv(self.grid_csv, index=True, header=False)
             self.table_grid = Grid_Table(self.conn, 'grid')
             self.table_grid.drop_table()
             self.table_grid.create_table()
