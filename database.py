@@ -662,13 +662,13 @@ class Grid_Table(Postgres_Table):
         '''Add PostGIS Point geometry to the database.'''
         sql = """
             ALTER TABLE {0}
-            ADD COLUMN {1} geometry(POINTM, 4326)
+            ADD COLUMN {1} geometry(POINT, 4326)
         """
         self.cur.execute(sql.format(self.table, 'minpoint'))
         self.cur.execute(sql.format(self.table, 'maxpoint'))
         self.conn.commit()
 
-        print('Adding PostGIS POINTM to table.')
+        print('Adding PostGIS POINT to table.')
         sql = """
             UPDATE {0}
             SET {1} = ST_SetSRID(
