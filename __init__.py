@@ -23,13 +23,14 @@ import os
 from os.path import abspath, basename, dirname, exists, join, splitext
 import pycurl
 import re
+import time
 import zipfile
 
 
 # ------------------------------------------------------------------------------
 # WEB
 # ------------------------------------------------------------------------------
-def download_url(url, destination, fileExtension = '.xls'):
+def download_url(url, destination, extension = '.xls'):
     '''
     Write url to temp file.
     :param url: URL to download data from
@@ -42,7 +43,10 @@ def download_url(url, destination, fileExtension = '.xls'):
     :return: Path to temp file containing URL data
     :rtype: string
     '''
-    tempFile = join(destination, 'temp_data' + fileExtension)
+    tempFile = join(
+        destination,
+        'temp_data_%s%s' % (str(time.time()), extension)
+    )
     with open(tempFile, 'wb') as f:
         c = pycurl.Curl()
         c.setopt(c.URL, url)
@@ -193,3 +197,4 @@ def extract_file(filepath, destination):
 # PACKAGE IMPORTS
 # ------------------------------------------------------------------------------
 from .database import *
+from .statistics import *
