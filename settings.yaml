@@ -1,0 +1,18 @@
+seattle:
+  zone: 10
+  lonMin: -126.
+  lonMax: -122.
+  latMin: 45.
+  latMax: 49.
+  stepSize: 0.1
+  shore: P
+
+
+houston:
+  zone: 15
+  lonMin: -96.
+  lonMax: -91.
+  latMin: 28.
+  latMax: 30.
+  stepSize: 0.1
+  shore: G
