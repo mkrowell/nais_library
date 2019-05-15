@@ -16,11 +16,12 @@
 import datetime
 from glob import glob
 import io
+import math
 import matplotlib.pyplot as plt
 from multiprocessing.dummy import Pool
 import numpy as np
 import os
-from os.path import exists, join
+from os.path import dirname, exists, join
 import osgeo.ogr
 import pandas as pd
 from postgis.psycopg import register
@@ -34,6 +35,7 @@ import tempfile
 import time
 import webbrowser
 import zipfile
+import yaml
 
 from . import download_url, extract_zip, find_file
 
@@ -47,84 +49,82 @@ class NAIS_Database(object):
     Build PostgreSQL database of NAIS point data.
     '''
 
-    def __init__(self, zone, year, password):
-        # database parameters
+    def __init__(self, city, year, password):
+        # arguments
+        self.city = city
+        self.year = year
         self.password = password
+
+        # spatial parameters
+        param_yaml = join(dirname(__file__), 'settings.yaml')
+        with open(param_yaml, 'r') as stream:
+            self.parameters = yaml.safe_load(stream)[self.city]
+
+        # self.parameters = yaml.load(open(parameters_yaml).read())
+        self.zone = self.parameters['zone']
+        self.lonMin = self.parameters['lonMin']
+        self.lonMax = self.parameters['lonMax']
+        self.latMin = self.parameters['latMin']
+        self.latMax = self.parameters['latMax']
+        self.stepSize = self.parameters['stepSize']
+
+        # time parameters
+        self.months = [str(i).zfill(2) for i in range(1, 13)]
+
+        # database parameters
         self.conn = psycopg2.connect(
             host='localhost',
             dbname='postgres',
             user='postgres',
             password=self.password)
 
-        # file parameters
-        self.root = tempfile.mkdtemp()
-        self.year = year
-        self.zone = zone
-        self.months = [str(i).zfill(2) for i in range(1, 13)]
-        self.grid_csv = join(self.root, 'grid_table.csv')
-        self.nais_csvs = None
-
-        # spatial parameters
-        self.lonMin = -126.
-        self.lonMax = -122.
-        self.latMin = 45.
-        self.latMax = 49.
-        self.stepSize = 0.1
-
         # tables
         self.table_shore = Shapefile_Table(self.conn, 'shore')
         self.table_tss = Shapefile_Table(self.conn, 'tss')
-        self.table_grid = Grid_Table(self.conn, 'grid_{0}'.format(self.zone))
 
-        self.table_points = Points_Table(self.conn, 'nais_points_{0}'.format(self.zone))
+        self.table_points = Points_Table(
+            self.conn,
+            'nais_points_{0}'.format(self.zone)
+        )
         self.table_near = Near_Table(
             self.conn,
             'near_points_{0}'.format(self.zone),
-            self.table_points.table)
+            self.table_points.table
+        )
 
-        self.table_tracks = Tracks_Table(self.conn, 'nais_tracks_{0}'.format(self.zone))
+        self.table_tracks = Tracks_Table(
+            self.conn,
+            'nais_tracks_{0}'.format(self.zone)
+        )
         self.table_cpa = CPA_Table(
             self.conn,
             'near_tracks_{0}'.format(self.zone),
-            self.table_tracks.table)
+            self.table_tracks.table
+        )
 
+        self.table_grid = Grid_Table(self.conn, 'grid_{0}'.format(self.zone))
+
+        # file parameters
+        self.root = tempfile.mkdtemp()
+
+    @property
+    def nais_csvs(self):
+        return glob(self.root + '\\AIS*.csv')
 
     # --------------------------------------------------------------------------
-    # MAIN METHODS
+    # MAIN METHOD
     # --------------------------------------------------------------------------
     def build_tables(self):
         '''Build database of raw data.'''
         start = time.time()
-        self.download_raw()
-        self.preprocess_raw()
-
         try:
-            Build shoreline table
-            print('Constructing shoreline table...')
-            self.table_shore.drop_table()
-            self.table_shore.create_table(filepath=self.shoreline_shp)
-            self.table_shore.reduce_table()
-
-            # Build shoreline table
-            print('Constructing tss table...')
-            self.table_tss.drop_table()
-            self.table_tss.create_table(filepath=self.tss_shp)
-
-            # Build nais points table
-            print('Constructing nais_points table...')
-            self.table_points.drop_table()
-            self.table_points.create_table()
-            self.table_points.set_timezone()
-            self.table_points.set_parallel(17)
-
-            # Copy data from temp directory and clean up
-            for csv_file in self.nais_csvs:
-                self.table_points.copy_data(csv_file)
-
-            # Add PostGIS geometry and crete index for space and time
-            self.table_points.add_geometry()
-            self.table_points.add_indexes()
-
+            self.build_shore()
+            self.build_tss()
+            self.build_grid(overwrite=False)
+            
+            self.build_nais_points(overwrite=False)
+            self.build_nais_tracks(overwrite=False)
+            
             # Make near points table
             self.table_near.drop_table()
             self.table_near.near_points()
@@ -132,29 +132,6 @@ class NAIS_Database(object):
             # Make near tracks table
             self.table_cpa.drop_table()
             self.table_cpa.near_tracks()
-
-            # Create grid table
-            print('Constructing grid table...')
-            self.grid_df = Sector_Dataframe(
-                self.lonMin,
-                self.lonMax,
-                self.latMin,
-                self.latMax,
-                self.stepSize
-            ).generate_df()
-            self.grid_df.to_csv(self.grid_csv, index=True, header=False)
-            self.table_grid.drop_table()
-            self.table_grid.create_table()
-            self.table_grid.copy_data(self.grid_csv)
-            self.table_grid.add_points()
-            self.table_grid.make_bounding_box()
-
-            # Create tracks table from points table
-            print('Constructing nais_tracks table...')
-            self.table_tracks.drop_table()
-            self.table_tracks.add_tracks()
-            print('Removing tracks that cross shore...')
-            self.table_tracks.reduce_table()
 
         except Exception as err:
             print(err)
@@ -164,26 +141,80 @@ class NAIS_Database(object):
             end = time.time()
             print('Elapsed Time: {0} minutes'.format((end-start)/60))
 
+    # --------------------------------------------------------------------------
+    # UTILITY METHODS
+    # --------------------------------------------------------------------------
+    def build_shore(self):
+        '''Construct shoreline table.'''
+        print('Constructing shoreline table...')
+        shore = Shoreline_Download(self.root)
+        self.shoreline_shp = shore.download_shoreline()
+        self.table_shore.create_table(filepath=self.shoreline_shp)
+        self.table_shore.reduce_table(self.parameters['region'])
+
+    def build_tss(self):
+        '''Construct TSS table.'''
+        print('Constructing tss table...')
+        tss = TSS_Download(self.root)
+        self.tss_shp = tss.download_tss()
+        self.table_tss.create_table(filepath=self.tss_shp)
+
+    def build_grid(self):
+        '''Create grid table.'''
+        print('Constructing grid table...')
+        self.grid_df = Sector_Dataframe(
+            self.lonMin,
+            self.lonMax,
+            self.latMin,
+            self.latMax,
+            self.stepSize
+        ).generate_df()
+        self.grid_csv = join(self.root, 'grid_table.csv')
+        self.grid_df.to_csv(self.grid_csv, index=True, header=False)
+        self.table_grid.drop_table()
+
+        self.table_grid.create_table()
+        self.table_grid.copy_data(self.grid_csv)
+        self.table_grid.add_points()
+        # self.table_grid.make_bounding_box()
+
     def download_raw(self):
         '''Dowload raw data to a temp directory.'''
-        raw = NAIS_Download(self.root, self.zone, self.year)
+        raw = NAIS_Download(self.root, self.city, self.year)
         for month in self.months:
             raw.download_nais(month)
 
-        shore = Shoreline_Download(self.root)
-        self.shoreline_shp = shore.download_shoreline()
-
-        tss = TSS_Download(self.root)
-        self.tss_shp = tss.download_tss()
-
     def preprocess_raw(self):
         '''Process the raw csv files.'''
-        raw = NAIS_Download(self.root, self.zone, self.year)
+        raw = NAIS_Download(self.root, self.city, self.year)
         with Pool(processes=12) as pool:
             pool.map(raw.preprocess_nais, self.months)
 
-        # Get list of processed files
-        self.nais_csvs = glob(self.root + '\\AIS*.csv')
+    def build_nais_points(self):
+        '''Build nais points table.'''
+        print('Constructing nais_points table...')
+        self.download_raw()
+        self.preprocess_raw()
+        self.table_points.drop_table()
+        self.table_points.create_table()
+        self.table_points.set_parallel(17)
+        self.table_points.set_timezone()
+
+        for csv_file in self.nais_csvs:
+            self.table_points.copy_data(csv_file)
+
+        self.table_points.add_geometry()
+        self.table_points.add_tss()
+        self.table_points.add_indexes()
+
+    def build_nais_tracks(self):
+        '''Create tracks table from points table.'''
+        print('Constructing nais_tracks table...')
+        self.table_tracks.drop_table()
+        self.table_tracks.add_tracks()
+
+        print('Removing tracks that cross shore...')
+        self.table_tracks.reduce_table()
 
 
 # ------------------------------------------------------------------------------
@@ -199,10 +230,10 @@ class Shoreline_Download(object):
         '''Download zip file and extract to temp directory.'''
         output = join(self.root, 'us_medium_shoreline.shp')
         if exists(output):
-            print('The Shoreline download already exists')
+            print('The Shoreline shapefile has already been downloaded.')
             return output
 
-        print('Downloading the US Shoreline shapefile.')
+        print('Downloading the Shoreline shapefile...')
         zfile = download_url(self.url, self.root, '.zip')
         extract_zip(zfile, self.root)
         os.remove(zfile)
@@ -218,10 +249,10 @@ class TSS_Download(object):
         '''Download zip file and extract to temp directory.'''
         output = join(self.root, 'shippinglanes.shp')
         if exists(output):
-            print('The TSS download already exists')
+            print('The TSS shapefile has already been downloaded.')
             return output
 
-        print('Downloading the TSS shapefile.')
+        print('Downloading the TSS shapefile...')
         download = requests.get(self.url)
         zfile = zipfile.ZipFile(io.BytesIO(download.content))
         zfile.extractall(self.root)
@@ -233,24 +264,37 @@ class NAIS_Download(object):
     Download raw NAIS data from MarineCadastre to local temp directory.
     '''
 
-    def __init__(self, root, zone, year):
+    def __init__(self, root, city, year):
         self.root = root
         self.year = year
-        self.zone = zone
+        self.city = city
+
+        param_yaml = join(dirname(__file__), 'settings.yaml')
+        with open(param_yaml, 'r') as stream:
+            self.parameters = yaml.safe_load(stream)[self.city]
+
+        # self.parameters = yaml.load(open(parameters_yaml).read())
+        self.zone = self.parameters['zone']
+        self.lonMin = self.parameters['lonMin']
+        self.lonMax = self.parameters['lonMax']
+        self.latMin = self.parameters['latMin']
+        self.latMax = self.parameters['latMax']
+        self.stepSize = self.parameters['stepSize']
+
         self.name = 'AIS_{0}_{1}_Zone{2}.csv'
         self.url = 'https://coast.noaa.gov/htdata/CMSP/AISDataHandler/{0}/AIS_{1}_{2}_Zone{3}.zip'
         self.download_dir = join(self.root, 'AIS_ASCII_by_UTM_Month')
 
+    @retry(stop_max_attempt_number=7)
     def download_nais(self, month):
         '''Download zip file and extract to temp directory.'''
         name = self.name.format(self.year, month, self.zone)
         csv = join(self.root, name)
-        url = self.url.format(self.year, self.year, month, self.zone)
-
         if exists(csv):
             return
 
-        print('Downloading file for month {0}...'.format(month))
+        print('Downloading NAIS file for month {0}...'.format(month))
+        url = self.url.format(self.year, self.year, month, self.zone)
         zfile = download_url(url, self.root, '.zip')
         extract_zip(zfile, self.root)
 
@@ -258,20 +302,28 @@ class NAIS_Download(object):
         extracted_file = find_file(self.root, name)
         shutil.copy(extracted_file, self.root)
 
-        # Remove subdirectories created during unzipping
+    def clean_up(self):
+        '''Remove subdirectories created during unzipping.'''
         if exists(self.download_dir):
             shutil.rmtree(self.download_dir)
 
     def preprocess_nais(self, month):
         '''Add derived fields and validate data types.'''
         csv = join(self.root, self.name.format(self.year, month, self.zone))
-        df = NAIS_Dataframe(csv)
-
         print('Preprocessing file for month {0}...'.format(month))
+        df = NAIS_Dataframe(
+            csv,
+            self.lonMin,
+            self.lonMax,
+            self.latMin,
+            self.latMax,
+            self.stepSize
+        )
+
         # Reduce data
         df.drop_bad_data()
-        df.drop_spatial()
         df.drop_moored()
+        df.drop_spatial()
 
         # Add derived fields
         df.add_sector()
@@ -291,9 +343,8 @@ class NAIS_Download(object):
 # ------------------------------------------------------------------------------
 class NAIS_Dataframe(object):
 
-    def __init__(self, csv_file):
+    def __init__(self, csv_file, lonMin, lonMax, latMin, latMax, stepSize):
         '''Process nais dataframe.'''
-        # dataframe parameters
         self.headers = [
             'MMSI',
             'BaseDateTime',
@@ -320,19 +371,26 @@ class NAIS_Dataframe(object):
             'Heading',
             'VesselType'
         ]
+        self.csv = csv_file
+        self.df = pd.read_csv(self.csv, usecols=self.headers)
+        self.df['BaseDateTime'] = pd.to_datetime(self.df['BaseDateTime'])
 
         # spatial parameters
-        self.lonMin = -126.
-        self.lonMax = -122.
-        self.latMin = 45.
-        self.latMax = 49.
-        self.stepSize = 0.1
-        self.lon = np.arange(self.lonMin, self.lonMax + self.stepSize, self.stepSize)
-        self.lat = np.arange(self.latMin, self.latMax + self.stepSize, self.stepSize)
-
-        self.csv = csv_file
-        self.df = pd.read_csv(self.csv, usecols = self.headers)
-        self.df['BaseDateTime'] = pd.to_datetime(self.df['BaseDateTime'])
+        self.lonMin = lonMin
+        self.lonMax = lonMax
+        self.latMin = latMin
+        self.latMax = latMax
+        self.stepSize = stepSize
+        self.lonRange = np.arange(
+            self.lonMin,
+            self.lonMax + self.stepSize,
+            self.stepSize
+        )
+        self.latRange = np.arange(
+            self.latMin,
+            self.latMax + self.stepSize,
+            self.stepSize
+        )
 
     def drop_bad_data(self):
         '''Remove bad data.'''
@@ -341,13 +399,22 @@ class NAIS_Dataframe(object):
         self.df = self.df[self.df['MMSI_Count'] == 9].copy()
         self.df.drop(columns=['MMSI_Count'], inplace=True)
 
-        # Remove rows with undefined heading
-        self.df['Heading'].replace(511, np.nan, inplace=True)
+        # Remove rows with invalid heading
+        self.df['Heading'] = np.where(
+            self.df['Heading'] > 360,
+            np.nan,
+            self.df['Heading']
+        )
 
         # Handle NOT NULL columns
         for col in self.headers_required:
             self.df[col].replace("", np.nan, inplace=True)
         self.df.dropna(how='any', subset=self.headers_required, inplace=True)
+
+    def drop_moored(self):
+        '''Drop rows with status of moored.'''
+        self.df = self.df[self.df['Status'] != 'moored'].copy()
+        self.df = self.df[self.df['SOG'] > 2].copy()
 
     def drop_spatial(self):
         '''Limit to bounding box.'''
@@ -357,11 +424,6 @@ class NAIS_Dataframe(object):
         self.df = self.df[self.df['LAT'].between(
             self.latMin, self.latMax, inclusive=False
         )].copy()
-
-    def drop_moored(self):
-        '''Drop rows with status of moored.'''
-        self.df = self.df[self.df['Status'] != 'moored'].copy()
-        self.df = self.df[self.df['SOG'] > 2].copy()
 
     def grid(self, array, i, column):
         '''Construct longitude grid.'''
@@ -377,10 +439,10 @@ class NAIS_Dataframe(object):
         self.df['SectorID'] = np.nan
 
         # Make grid of lat and lon
-        for x in range(len(self.lon)-1):
-            ilon, min_lon, max_lon, cond_lon = self.grid(self.lon, x, 'LON')
-            for y in range(len(self.lat)-1):
-                ilat, min_lat, max_lat, cond_lat = self.grid(self.lat, y, 'LAT')
+        for x in range(len(self.lonRange)-1):
+            ilon, min_lon, max_lon, cond_lon = self.grid(self.lonRange, x, 'LON')
+            for y in range(len(self.latRange)-1):
+                ilat, min_lat, max_lat, cond_lat = self.grid(self.latRange, y, 'LAT')
 
                 # Set SectorID
                 index  = "{0}.{1}".format(ilon, ilat)
@@ -576,7 +638,7 @@ class Postgres_Table(object):
     def create_table(self, filepath=None):
         '''Create given table.'''
         if filepath:
-            cmd = "shp2pgsql -s 4326 {0} {1} | psql -d postgres -U postgres -q".format(filepath, self.table)
+            cmd = "shp2pgsql -s 4326 -d {0} {1} | psql -d postgres -U postgres -q".format(filepath, self.table)
             subprocess.call(cmd, shell=True)
         else:
             sql = """
@@ -631,11 +693,47 @@ class Shapefile_Table(Postgres_Table):
         super(Shapefile_Table, self).__init__(conn, table)
         self.cur = self.conn.cursor()
 
-    def reduce_table(self):
-        # Limit shore to Pacific region
-        sql = "DELETE FROM {0} WHERE regions != 'P'".format(self.table)
+    def reduce_table(self, region):
+        '''Limit shore to Pacific region.'''
+        sql = "DELETE FROM {0} WHERE regions != '{1}'".format(
+            self.table,
+            region
+        )
         self.cur.execute(sql)
         self.conn.commit()
+
+class Grid_Table(Postgres_Table):
+
+    def __init__(self, conn, table):
+        '''Connect to default database.'''
+        super(Grid_Table, self).__init__(conn, table)
+        self.cur = self.conn.cursor()
+
+        self.columns = """
+            SectorID char(5) PRIMARY KEY,
+            MinLon float8 NOT NULL,
+            MinLat float8 NOT NULL,
+            MaxLon float8 NOT NULL,
+            MaxLat float8 NOT NULL
+        """
+
+    def add_points(self):
+        '''Add Point geometry to the database.'''
+        self.add_column('minpoint', datatype='POINT', geometry=True)
+        self.add_column('maxpoint', datatype='POINT', geometry=True)
+
+        print('Adding PostGIS POINTs to table.')
+        self.add_point('minpoint', 'minlon', 'minlat')
+        self.add_point('maxpoint', 'maxlon', 'maxlat')
+
+    def make_bounding_box(self):
+        '''Add polygon column in order to do spatial analysis.'''
+        self.add_column('boundingbox', datatype='BOX', geometry=True)
+
+        sql = """
+            UPDATE {0}
+            SET {1} = ST_SetSRID(ST_ENVELOPE({2}, {3}), 4326)
+        """.format(self.table, 'boundingbox', 'minpoint', 'maxpoint')
 
 class Points_Table(Postgres_Table):
 
@@ -671,11 +769,21 @@ class Points_Table(Postgres_Table):
         self.add_column('geom', datatype='POINTM', geometry=True)
         self.add_point('geom', 'lon', 'lat', "date_part('epoch', basedatetime)")
 
+    def add_tss(self):
+        '''Add column marking whether the point is in the TSS or not.'''
+        column = 'intss'
+        self.add_column(column, datatype='boolean', geometry=False)
+        self.conn.commit()
+        sql = """
+            UPDATE {0}
+            SET {1} = ST_Contains(tss.geom, {2}.geom)
+            FROM tss
+        """.format(self.table, column, self.table)
+
     def add_indexes(self):
-        '''Add spatial, time, and MMSI indices.'''
-        self.add_index('idx_mmsi', 'mmsi')
-        self.add_index('idx_sector', 'sectorid')
-        self.add_index('idx_time', 'interval')
+        '''Add indices.'''
+        self.add_index("idx_tracks", "mmsi, sectorid, trackid")
+        self.add_index("idx_near", "sectorid, (basedatetime::DATE), interval, mmsi")
 
 class Tracks_Table(Postgres_Table):
 
@@ -717,6 +825,23 @@ class Near_Table(Postgres_Table):
         self.cur = self.conn.cursor()
         self.input = input_table
 
+        self.columns =  [
+            'own_mmsi',
+            'own_sectorid',
+            'own_sog',
+            'own_heading',
+            'own_rot',
+            'own_length',
+            'own_vesseltype',
+            'own_tss'
+            'target_sog',
+            'target_tss',
+            'azimuth_deg',
+            'spot_distance',
+            'bearing'
+        ]
+        self.columnString =  ', '.join(self.columns[:-1])
+
     def near_points(self):
         '''Make pairs of points that happen in same sector and time interval.'''
         print('Joining nais_points with itself to make near table...')
@@ -734,6 +859,7 @@ class Near_Table(Postgres_Table):
                 n1.vesseltype AS own_vesseltype,
                 n1.length AS own_length,
                 n1.geom AS own_geom,
+                n1.intss AS own_tss,
                 n2.mmsi AS target_mmsi,
                 n2.sectorid AS target_sectorid,
                 n2.trackid AS target_trackid,
@@ -744,57 +870,51 @@ class Near_Table(Postgres_Table):
                 n2.rot AS target_rot,
                 n2.vesseltype AS target_vesseltype,
                 n2.geom AS target_geom,
-                ST_Distance(n1.geom, n2.geom)::geography AS spot_distance,
+                n2.intss AS target_tss
+                ST_Distance(n1.geom::geography, n2.geom::geography) AS spot_distance,
                 DEGREES(ST_Azimuth(n1.geom, n2.geom)) AS azimuth_deg
             FROM {1} n1 INNER JOIN {2} n2
             ON n1.sectorid = n2.sectorid
-            WHERE n1.mmsi != n2.mmsi
-            AND n1.basedatetime::date = n2.basedatetime::date
+            WHERE n1.basedatetime::date = n2.basedatetime::date
             AND n1.interval = n2.interval
+            AND n1.mmsi != n2.mmsi
         """.format(self.table, self.input, self.input)
         self.cur.execute(sql)
         self.conn.commit()
 
-    def near_dataframe(self, max_distance):
-        self.distance = max_distance
+    def near_points_dataframe(self, max_distance, sector_id):
+        '''Return dataframe of near points within max distance.'''
         sql = """
-            SELECT * FROM {0}
-            WHERE spot_distance <= {1}
-        """.format(self.table, self.distance)
+            SELECT {0} FROM {1}
+            WHERE spot_distance <= {2}
+            AND own_sectorid = '{3}'
+            AND own_sog > 5
+            AND target_sog > 5
+        """.format(self.columnString, self.table, max_distance, sector_id)
         self.cur.execute(sql)
         column_names = [desc[0] for desc in self.cur.description]
         return pd.DataFrame(self.cur.fetchall(), columns = column_names)
 
-    def near_table(self):
-        '''Create near table in pandas.'''
-        df = self.near_dataframe(500)
+    def near_table(self, max_distance, sector_id):
+        '''Create near table in pandas using max_distance = 1nm.'''
+        # 1nm = 1852 meters
+        df = self.near_points_dataframe(max_distance, sector_id)
         df['bearing'] = (df['azimuth_deg'] - df['own_heading']) % 360
-        cols = [
-            'own_mmsi',
-            'own_sog',
-            'own_length',
-            'own_vesseltype',
-            'azimuth_deg',
-            'spot_distance',
-            'bearing'
-        ]
-        return df[cols].copy()
+        return df[self.columns].copy()
 
-    def near_plot(self):
+    def near_plot(self, max_distance, sector_id, display_points):
         '''Plot the near points all in reference to own ship.'''
-        self.df_near = self.near_table().head(300)
+        self.df_near = self.near_table(max_distance, sector_id).head(display_points)
         theta = self.df_near['bearing']
         r = self.df_near['spot_distance']
-        # area = 200 * r**2
-        colors = theta
+        tss = self.df_near['own_tss']
+        colors = tss
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='polar')
         c = ax.scatter(theta, r, c=colors, cmap='hsv', alpha=0.75)
         plt.show()
 
     # def dbscan_near(self):
-
-
     # do dbscan on the POINTs
     # fit a circle to it - use as ship domain
     # use cpa distance equal to this radius
@@ -820,7 +940,7 @@ class CPA_Table(Postgres_Table):
 
     def near_tracks(self):
         '''Make pairs of points that happen in same sector and time interval.'''
-        print('Joining nais_points with itself to make near table...')
+        print('Joining nais_tracks with itself to make near table...')
         sql = """
             CREATE TABLE {0} AS
             SELECT
@@ -833,44 +953,12 @@ class CPA_Table(Postgres_Table):
                 n2.trackid AS target_trackid,
                 n2.track AS target_track,
                 ST_ClosestPointOfApproach(n1.track, n2.track) AS cpa_point,
-                ST_DistanceCPA(n1.track, n2.track)::geography AS cpa_distance,
-                to_timestamp(cpa_point) AS cpa_time
+                ST_DistanceCPA(n1.track, n2.track) AS cpa_distance,
+                ST_Angle(n1.track, n2.track) AS angle
             FROM {1} n1 INNER JOIN {2} n2
             ON n1.sectorid = n2.sectorid
             WHERE n1.mmsi != n2.mmsi
+            AND ST_CPAWithin(n1.track, n2.track, 926)
         """.format(self.table, self.input, self.input)
         self.cur.execute(sql)
         self.conn.commit()
-
-class Grid_Table(Postgres_Table):
-
-    def __init__(self, conn, table):
-        '''Connect to default database.'''
-        super(Grid_Table, self).__init__(conn, table)
-        self.cur = self.conn.cursor()
-
-        self.columns = """
-            SectorID char(5) PRIMARY KEY,
-            MinLon float8 NOT NULL,
-            MinLat float8 NOT NULL,
-            MaxLon float8 NOT NULL,
-            MaxLat float8 NOT NULL
-        """
-
-    def add_points(self):
-        '''Add Point geometry to the database.'''
-        self.add_column('minpoint', datatype='POINT', geometry=True)
-        self.add_column('maxpoint', datatype='POINT', geometry=True)
-
-        print('Adding PostGIS POINTs to table.')
-        self.add_point('minpoint', 'minlon', 'minlat')
-        self.add_point('maxpoint', 'maxlon', 'maxlat')
-
-    def make_bounding_box(self):
-        '''Add polygon column in order to do spatial analysis.'''
-        self.add_column('boundingbox', datatype='ENVELOPE', geometry=True)
-
-        sql = """
-            UPDATE {0}
-            SET {1} = ST_SetSRID(ST_ENVELOPE({2}, {3}), 4326)
-        """.format(self.table, 'boundingbox', 'minpoint', 'maxpoint')
