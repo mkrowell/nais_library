@@ -120,10 +120,10 @@ class NAIS_Database(object):
         try:
             self.build_shore()
             self.build_tss()
-            self.build_grid(overwrite=False)
+            self.build_grid()
             
-            self.build_nais_points(overwrite=False)
-            self.build_nais_tracks(overwrite=False)
+            self.build_nais_points()
+            self.build_nais_tracks()
             
             # Make near points table
             self.table_near.drop_table()
