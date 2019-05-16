@@ -60,7 +60,6 @@ class NAIS_Database(object):
         with open(param_yaml, 'r') as stream:
             self.parameters = yaml.safe_load(stream)[self.city]
 
-        # self.parameters = yaml.load(open(parameters_yaml).read())
         self.zone = self.parameters['zone']
         self.lonMin = self.parameters['lonMin']
         self.lonMax = self.parameters['lonMax']
