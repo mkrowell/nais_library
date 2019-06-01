@@ -14,6 +14,7 @@ class fileNotFound(Exception):
 # ------------------------------------------------------------------------------
 # IMPORTS
 # ------------------------------------------------------------------------------
+import datetime
 from collections import namedtuple
 import certifi
 import ctypes
@@ -45,7 +46,7 @@ def download_url(url, destination, extension = '.xls'):
     '''
     tempFile = join(
         destination,
-        'temp_data_%s%s' % (str(time.time()), extension)
+        'temp_data%s' % extension
     )
     with open(tempFile, 'wb') as f:
         c = pycurl.Curl()
@@ -194,7 +195,60 @@ def extract_file(filepath, destination):
 
 
 # ------------------------------------------------------------------------------
+# DECORATORS
+# ------------------------------------------------------------------------------
+def print_reduction(original_function):
+    '''Print the amount of rows removed by method.'''
+    def print_reduction_wrapper(self, *args,**kwargs):
+        before = len(self.df)
+        x = original_function(self, *args,**kwargs)
+        after = len(self.df)
+        rows = after - before
+        percent = 100*rows/before
+        print("Removed Rows = {0}, Percent Reduction = {1}".format(
+            rows,
+            percent)
+        )
+        return x
+    return print_reduction_wrapper
+
+def time_this(original_function):
+    '''Print the method's execution time.'''
+    def time_this_wrapper(*args,**kwargs):
+        before = datetime.datetime.now()
+        x = original_function(*args,**kwargs)
+        after = datetime.datetime.now()
+        print("Elapsed Time = {0}".format(after-before))
+        return x
+    return time_this_wrapper
+
+def time_all(Cls):
+    '''Apply the time_this decorator to each method in class.'''
+    # https://www.codementor.io/sheena/advanced-use-python-decorators-class-function-du107nxsv
+    class DecoratedClass(object):
+        def __init__(self, *args, **kwargs):
+            self.oInstance = Cls(*args, **kwargs)
+        def __getattribute__(self, s):
+            try:
+                # base class implementation
+                x = super(DecoratedClass, self).__getattribute__(s)
+            except AttributeError:
+                # base class does not have an implementation, raises AttributeError
+                pass
+            else:
+                return x
+            # Get the instance attributes
+            x = self.oInstance.__getattribute__(s)
+            # If it is a method, decorate it
+            if type(x) == type(self.__init__):
+                return time_this(x)
+            else:
+                return x
+    return DecoratedClass
+
+
+# ------------------------------------------------------------------------------
 # PACKAGE IMPORTS
 # ------------------------------------------------------------------------------
+from .dataframes import *
 from .database import *
-from .statistics import *
