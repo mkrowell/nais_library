@@ -1,3 +1,13 @@
+#!/usr/bin/env python
+'''
+.. module::
+    :language: Python Version 3.6.8
+    :platform: Windows 10
+    :synopsis: utility functions and decorators
+
+.. moduleauthor:: Maura Rowell <mkrowell@uw.edu>
+'''
+
 # ------------------------------------------------------------------------------
 # EXCEPTIONS
 # ------------------------------------------------------------------------------
@@ -204,7 +214,7 @@ def print_reduction(original_function):
         x = original_function(self, *args,**kwargs)
         after = len(self.df)
         rows = after - before
-        percent = 100*rows/before
+        percent = round(-100*rows/before, 2)
         print("Removed Rows = {0}, Percent Reduction = {1}".format(
             rows,
             percent)
