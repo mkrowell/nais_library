@@ -215,7 +215,8 @@ def print_reduction(original_function):
         after = len(self.df)
         rows = after - before
         percent = round(-100*rows/before, 2)
-        print("Removed Rows = {0}, Percent Reduction = {1}".format(
+        print("Method {0}: Removed Rows = {1}, Percent Reduction = {2}".format(
+            original_function.__name__,
             rows,
             percent)
         )
