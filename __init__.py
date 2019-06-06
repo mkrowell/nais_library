@@ -217,7 +217,7 @@ def print_reduction(original_function):
         percent = round(-100*rows/before, 2)
         print("Method {0}: Removed Rows = {1}, Percent Reduction = {2}".format(
             original_function.__name__,
-            rows,
+            -rows,
             percent)
         )
         return x
@@ -261,5 +261,6 @@ def time_all(Cls):
 # ------------------------------------------------------------------------------
 # PACKAGE IMPORTS
 # ------------------------------------------------------------------------------
+from .downloads import *
 from .dataframes import *
 from .database import *
