@@ -249,7 +249,7 @@ class Postgres_Table(object):
         register(self.conn)
 
     def set_parallel(self, cores):
-        '''Enable parallel.'''
+        '''Enable parallel - not sure if necessary.'''
         self.cur.execute("SET dynamic_shared_memory_type='windows'")
         self.cur.execute("SET max_worker_processes={0}".format(cores))
         self.cur.execute("SET max_parallel_workers={0}".format(cores))
@@ -429,16 +429,16 @@ class Points_Table(Postgres_Table):
         self.columns = """
             MMSI char(9) CHECK (char_length(MMSI) = 9) NOT NULL,
             BaseDateTime timestamp NOT NULL,
-            Segment integer NOT NULL,
+            Track_MMSI integer NOT NULL,
             LAT float8 NOT NULL,
             LON float8 NOT NULL,
             SOG float(4) NOT NULL,
             COG float(4) NOT NULL,
             Heading float(4) NOT NULL,
-            ROT float(4) NOT NULL,
-            Acceleration float(4),
+            Step_ROT float(4) NOT NULL,
+            Step_Acceleration float(4),
             Stop boolean,
-            Displaced flaot(4),
+            step_Displacement flaot(4),
             VesselName varchar(32),
             VesselType integer NOT NULL default -1,
             Status varchar(64),
