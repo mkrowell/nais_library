@@ -223,6 +223,21 @@ def print_reduction(original_function):
         return x
     return print_reduction_wrapper
 
+def check_length(original_function):
+    '''Print the amount of rows removed by method.'''
+    def check_length_wrapper(self, *args,**kwargs):
+        before = len(self.df)
+        x = original_function(self, *args,**kwargs)
+        after = len(self.df)
+        rows = after - before
+        if rows != 0:
+            print("ALERT: {0} changed length of dataframe by {1}!".format(
+                original_function.__name__,
+                rows)
+            )
+        return x
+    return check_length_wrapper
+
 def time_this(original_function):
     '''Print the method's execution time.'''
     def time_this_wrapper(*args,**kwargs):
