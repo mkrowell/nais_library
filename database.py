@@ -34,6 +34,7 @@ import time
 import zipfile
 import yaml
 
+from . import time_all
 from . import download_url, extract_zip, find_file
 from . import dataframes
 from .downloads import TSS_Download, Shoreline_Download, NAIS_Download
@@ -42,6 +43,7 @@ from .downloads import TSS_Download, Shoreline_Download, NAIS_Download
 # ------------------------------------------------------------------------------
 # MAIN CLASS
 # ------------------------------------------------------------------------------
+@time_all
 class NAIS_Database(object):
 
     '''
@@ -131,22 +133,22 @@ class NAIS_Database(object):
         start = time.time()
         try:
             # Environmental
-            # self.build_shore()
-            # self.build_tss()
-            # self.build_grid()
+            self.build_shore()
+            self.build_tss()
+            self.build_grid()
 
             # Points
-            # self.build_nais_points()
-            # self.table_rot.drop_table()
-            # self.table_rot.select_rot(100)
+            self.build_nais_points()
+            self.table_rot.drop_table()
+            self.table_rot.select_rot(100)
 
             # Tracks
-            # self.build_nais_tracks()
+            self.build_nais_tracks()
             self.build_nais_interactions()
 
             # Make near points table
-            # self.table_near.drop_table()
-            # self.table_near.near_points()
+            self.table_near.drop_table()
+            self.table_near.near_points()
 
 
         except Exception as err:
@@ -427,13 +429,16 @@ class Points_Table(Postgres_Table):
         self.columns = """
             MMSI char(9) CHECK (char_length(MMSI) = 9) NOT NULL,
             BaseDateTime timestamp NOT NULL,
-            TrackID integer NOT NULL,
+            Segment integer NOT NULL,
             LAT float8 NOT NULL,
             LON float8 NOT NULL,
             SOG float(4) NOT NULL,
             COG float(4) NOT NULL,
             Heading float(4) NOT NULL,
             ROT float(4) NOT NULL,
+            Acceleration float(4),
+            Stop boolean,
+            Displaced flaot(4),
             VesselName varchar(32),
             VesselType integer NOT NULL default -1,
             Status varchar(64),
