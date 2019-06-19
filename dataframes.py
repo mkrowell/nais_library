@@ -125,6 +125,8 @@ class NAIS_Dataframe(object):
             'Cargo'
         ]
         self.headers_required = [
+            'MMSI',
+            'BaseDateTime',
             'LAT',
             'LON',
             'SOG',
@@ -137,6 +139,7 @@ class NAIS_Dataframe(object):
 
         self.df = pd.read_csv(self.csv, usecols=self.headers)
         self.df['BaseDateTime'] = pd.to_datetime(self.df['BaseDateTime'])
+
 
     # PROPERTIES ---------------------------------------------------------------
     @property
@@ -154,14 +157,8 @@ class NAIS_Dataframe(object):
             ['MMSI', 'Track_AIS']
         )
 
-    # HELPER FUNCTIONS ---------------------------------------------------------
-    # def normalize_angle(self, column, start, end):
-    #     '''Normalized an angle to be within the start and end.'''
-    #     width = end - start
-    #     offset = self.df[column] - start
-    #     name = '{0}_Normalized'.format(column)
-    #     self.df[name] = offset - np.floor(offset/width)*width + start
 
+    # HELPER FUNCTIONS ---------------------------------------------------------
     def normalize_angle(self, column, start, end):
         '''Normalized an angle to be within the start and end.'''
         self.df['Difference'] = self.grouped_time[column].diff()
@@ -203,13 +200,19 @@ class NAIS_Dataframe(object):
         self.mark_jump()
         self.drop_sparse_track()
 
-    def split_mmsi_stop(self, maxTime=2, minDisplace=5, minAccel=10, minSpeed=2):
+    def split_mmsi_stop(self, maxTime=2, minDisplace=8, minAccel=10, minSpeed=2):
         '''Split MMSI data over stops.'''
         self.step_acceleration()
         self.step_displacement()
         self.step_rot()
         self.mark_stop(maxTime, minDisplace, minAccel, minSpeed)
         self.mark_segment()
+        self.drop_sparse_subtrack()
+
+    def save_output(self):
+        '''Save output to be read into PostgreSQL.'''
+        self.validate_types()
+        self.reorder_output()
 
 
     # CLEAN DATA ---------------------------------------------------------------
@@ -288,8 +291,8 @@ class NAIS_Dataframe(object):
             df['Step_Distance'] =  haversine(
                 df['LAT'].shift(),
                 df['LON'].shift(),
-                df.loc[1:]['LAT'],
-                df.loc[1:]['LON'])
+                df.loc[1:,'LAT'],
+                df.loc[1:,'LON'])
             return df.set_index('index')
         self.df = self.grouped_mmsi.apply(distance)
 
@@ -379,18 +382,27 @@ class NAIS_Dataframe(object):
     def mark_stop(self, maxTime, minDisplace, minAccel, minSpeed):
         '''Assign status 'stop' to a point if it satisfies criteria'''
         # How is NA handled here?
-        cTime = (self.df['Step_Time'] > maxTime*60)
+        cTimeMax = (self.df['Step_Time'] > maxTime*60)
+        cTimeNA = (self.df['Step_Time'] == np.nan)
+        cTime = cTimeMax | cTimeNA
         cAccel = (abs(self.df['Step_Acceleration']) < minAccel)
         cSOG = (self.df['SOG'] < minSpeed)
-        cDisplace = (abs(self.df['Step_Displacement']) < minDisplace/100)
+        cDisplace = (abs(self.df['Step_Displacement']) < minDisplace)
         cond = cTime & cSOG & cDisplace & cAccel
         self.df['Stop'] = np.where(cond, 1, 0)
 
     def mark_segment(self):
         '''Assign an id to points .'''
-        self.df['Stop_Change'] = abs(self.df['Stop'].diff())
+        self.df['Stop_Change'] = abs(self.grouped_mmsi['Stop'].diff()).fillna(0)
         self.df['Break_Stop'] = self.grouped_mmsi['Stop_Change'].cumsum()
         self.df['Track_MMSI'] = self.df['Track_AIS'] + self.df['Break_Stop']
+
+    @print_reduction
+    def drop_sparse_subtrack(self):
+        '''Drop sparse tracks.'''
+        self.df = self.df.groupby(
+            ['MMSI', 'Track_MMSI']
+        ).filter(lambda g: len(g)>=50)
 
 
     # PREP FOR POSTGRES --------------------------------------------------------
@@ -406,7 +418,7 @@ class NAIS_Dataframe(object):
         self.df['VesselName'].replace(-1, "undefined", inplace=True)
 
         # Handle int columns
-        cols_int = ['VesselType', 'Cargo', 'Segment']
+        cols_int = ['VesselType', 'Cargo', 'Track_MMSI']
         for col in cols_int:
             self.df[col] = self.df[col].astype(int)
 
@@ -436,11 +448,10 @@ class NAIS_Dataframe(object):
         output = self.df.reindex(order, axis="columns")
         output.to_csv(self.csv, index=False, header=False)
 
-
-
+    # PLOTS --------------------------------------------------------------------
     def plots(self):
         '''Plot time lag.'''
-        plt.style.use(['ggplot', 'presentation'])
+        plt.style.use(['ggplot'])
         fig = plt.figure()
 
         ax2 = plt.subplot(111)
@@ -452,19 +463,3 @@ class NAIS_Dataframe(object):
             self.df['Step_Distance'])
 
         plt.show()
-
-
-    # @check_length
-    # def step_bearing(self):
-    #     '''Return bearing required to get from first to second point.'''
-    #     def bearing(df):
-    #         df.reset_index(inplace=True)
-    #         df['Step_Bearing'] = azimuth(
-    #             df['LAT'].shift(),
-    #             df['LON'].shift(),
-    #             df.iloc[1:]['LAT'],
-    #             df.iloc[1:]['LON']
-    #         )
-    #         return df.set_index('index')
-    #     self.df = self.grouped_mmsi.apply(bearing)
-    #     self.normalize_angle('Step_Bearing', 0, 360)
