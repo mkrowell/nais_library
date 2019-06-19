@@ -14,8 +14,6 @@
 # IMPORTS
 # ------------------------------------------------------------------------------
 from glob import glob
-import io
-import matplotlib.pyplot as plt
 from multiprocessing.dummy import Pool
 import numpy as np
 import os
@@ -25,13 +23,11 @@ import pandas as pd
 from postgis.psycopg import register
 import psycopg2
 from psycopg2 import sql
-import requests
 from retrying import retry
 import shutil
 import subprocess
 import tempfile
 import time
-import zipfile
 import yaml
 
 from . import time_all
@@ -69,8 +65,8 @@ class NAIS_Database(object):
         self.stepSize = self.parameters['stepSize']
 
         # time parameters
-        # self.months = [str(i).zfill(2) for i in range(1, 13)]
-        self.months = ['01']
+        self.months = [str(i).zfill(2) for i in range(1, 13)]
+        # self.months = ['01']
 
         # database parameters
         self.conn = psycopg2.connect(
@@ -79,38 +75,55 @@ class NAIS_Database(object):
             user='postgres',
             password=self.password)
 
-        # tables
+        # environment
         self.table_shore = Shapefile_Table(
             self.conn,
-            'shore_{0}'.format(self.zone)
+            'shore_{0}'.format(self.city)
         )
         self.table_tss = Shapefile_Table(
             self.conn,
-            'tss_{0}'.format(self.zone)
+            'tss_{0}'.format(self.city)
         )
+        self.table_grid = Grid_Table(
+            self.conn,
+            'grid_{0}'.format(self.city)
+        )
+
+        # vessels
         self.table_points = Points_Table(
             self.conn,
-            'nais_points_{0}'.format(self.zone)
-        )
-        self.table_rot = ROT_Table(
-            self.conn,
-            'nais_rot_{0}'.format(self.zone)
-        )
-        self.table_near = Near_Table(
-            self.conn,
-            'near_points_{0}'.format(self.zone),
-            self.table_points.table
+            'nais_points_{0}'.format(self.city)
         )
         self.table_tracks = Tracks_Table(
             self.conn,
-            'nais_tracks_{0}'.format(self.zone)
+            'nais_tracks_{0}'.format(self.city)
         )
+
+        # interactions
         self.table_cpa = Interactions_Table(
             self.conn,
-            'near_tracks_{0}'.format(self.zone),
+            'cpa_{0}'.format(self.city),
             self.table_tracks.table
         )
-        self.table_grid = Grid_Table(self.conn, 'grid_{0}'.format(self.zone))
+        self.table_analysis = Analysis_Table(
+            self.conn,
+            'analysis_{0}'.format(self.city),
+            self.table_points.table,
+            self.table_cpa.table
+        )
+
+
+        # Others
+        self.table_rot = ROT_Table(
+            self.conn,
+            'nais_rot_{0}'.format(self.city)
+        )
+        self.table_near = Near_Table(
+            self.conn,
+            'near_points_{0}'.format(self.city),
+            self.table_points.table
+        )
+
 
         # file parameters
         self.root = tempfile.mkdtemp()
@@ -119,13 +132,6 @@ class NAIS_Database(object):
     def nais_csvs(self):
         return glob(self.root + '\\AIS*.csv')
 
-    def download_raw(self):
-        '''Dowload raw data to a temp directory.'''
-        raw = NAIS_Download(self.root, self.city, self.year)
-        for month in self.months:
-            raw.download_nais(month)
-        raw.clean_up()
-
 
     # BUILD DATABASE -----------------------------------------------------------
     def build_tables(self):
@@ -133,22 +139,23 @@ class NAIS_Database(object):
         start = time.time()
         try:
             # Environmental
-            self.build_shore()
-            self.build_tss()
-            self.build_grid()
+            # self.build_shore()
+            # self.build_tss()
+            # self.build_grid()
 
             # Points
-            self.build_nais_points()
-            self.table_rot.drop_table()
-            self.table_rot.select_rot(100)
+            # self.build_nais_points()
 
             # Tracks
             self.build_nais_tracks()
             self.build_nais_interactions()
 
+            # Analysis
+            self.build_nais_analysis()
+
             # Make near points table
-            self.table_near.drop_table()
-            self.table_near.near_points()
+            # self.table_near.drop_table()
+            # self.table_near.near_points()
 
 
         except Exception as err:
@@ -198,15 +205,15 @@ class NAIS_Database(object):
     def build_nais_points(self):
         '''Build nais points table.'''
         print('Constructing nais_points table...')
-        self.download_raw()
-
         raw = NAIS_Download(self.root, self.city, self.year)
+        for month in self.months:
+            raw.download_nais(month)
+        raw.clean_up()
         with Pool(processes=12) as pool:
             pool.map(raw.preprocess_nais, self.months)
 
         self.table_points.drop_table()
         self.table_points.create_table()
-        self.table_points.set_parallel(20)
         self.table_points.set_timezone()
 
         for csv_file in self.nais_csvs:
@@ -222,14 +229,20 @@ class NAIS_Database(object):
         self.table_tracks.drop_table()
         self.table_tracks.convert_to_tracks(self.table_points.table)
 
-        print('Removing tracks that cross shore...')
-        self.table_tracks.reduce_table(self.table_shore.table)
-
     def build_nais_interactions(self):
         '''Create table to generate pair-wise cpa.'''
         self.table_cpa.drop_table()
         self.table_cpa.interaction_tracks()
-        self.table_cpa.interaction_cpa()
+        self.table_cpa.interaction_cpa_point()
+        self.table_cpa.interaction_track_points()
+        self.table_cpa.interaction_cpa_time()
+        self.table_cpa.interaction_cpa_distance()
+        self.table_cpa.interaction_cpa_azimuth()
+
+    def build_nais_analysis(self):
+        '''Create table to generate pair-wise cpa.'''
+        self.table_analysis.drop_table()
+        self.table_analysis.join_points_cpa()
 
 
 # ------------------------------------------------------------------------------
@@ -437,8 +450,8 @@ class Points_Table(Postgres_Table):
             Heading float(4) NOT NULL,
             Step_ROT float(4) NOT NULL,
             Step_Acceleration float(4),
-            Stop boolean,
-            step_Displacement flaot(4),
+            Stop integer,
+            Step_Displacement float(4),
             VesselName varchar(32),
             VesselType integer NOT NULL default -1,
             Status varchar(64),
@@ -494,27 +507,21 @@ class Tracks_Table(Postgres_Table):
             CREATE TABLE {0} AS
             SELECT
                 mmsi,
-                length,
-                width,
-                vesseltype,
-                trackid,
+                track_mmsi,
+                stop,
                 min(basedatetime) AS start_time,
                 max(basedatetime) AS end_time,
                 max(basedatetime) - min(basedatetime) AS duration,
                 ST_MakeLine(geom ORDER BY basedatetime) AS track
             FROM {1}
-            GROUP BY mmsi, length, width, vesseltype, trackid
+            WHERE stop = 0
+            GROUP BY mmsi, stop, track_mmsi
             """.format(self.table, points)
         self.cur.execute(sql)
         self.conn.commit()
 
     def reduce_table(self, shore_table):
-        '''Remove tracks that cross the shoreline.'''
-        # sql = """
-        #     DELETE FROM {0} AS n
-        #     USING {1} AS s
-        #     WHERE ST_Intersects(n.track, s.geom)
-        # """.format(self.table, shore_table)
+        '''Remove tracks that have a short duration.'''
         sql = """
             DELETE FROM {0}
             WHERE duration < '00:15:00'
@@ -532,22 +539,23 @@ class Interactions_Table(Postgres_Table):
 
     def interaction_tracks(self):
         '''Make pairs of tracks that happen in same time interval.'''
-        print('Joining nais_tracks with itself to make near table...')
+        print('Joining nais_tracks with itself to make interaction table...')
         sql = """
             CREATE TABLE {0} AS
             SELECT
                 n1.mmsi AS own_mmsi,
-                n1.trackid AS own_trackid,
+                n1.track_mmsi AS own_trackid,
                 n1.track AS own_track,
                 n2.mmsi AS target_mmsi,
-                n2.trackid AS target_trackid,
+                n2.track_mmsi AS target_trackid,
                 n2.track AS target_track,
                 ST_ClosestPointOfApproach(n1.track, n2.track) AS cpa_point,
                 ST_DistanceCPA(n1.track::geometry, n2.track::geometry) AS cpa_distance
             FROM {1} n1 LEFT JOIN {2} n2
-            ON n1.start_time between n2.start_time and n2.end_time
-            AND ST_DWithin(n1.trackid::geometry, n2.trackid::geometry, 18520)
+            ON (n1.start_time, n1.end_time) OVERLAPS (n2.start_time, n2.end_time)
+            AND ST_DWithin(n1.track::geometry, n2.track::geometry, 5556)
             AND n1.mmsi != n2.mmsi
+            ORDER BY cpa_distance ASC
         """.format(self.table, self.input, self.input)
         self.cur.execute(sql)
         self.conn.commit()
@@ -558,18 +566,21 @@ class Interactions_Table(Postgres_Table):
         self.cur.execute(sql_delete)
         self.conn.commit()
 
-
-    def interaction_cpa(self):
-        '''Add CPA point, track points, cpa_distance, and time.'''
+    def interaction_cpa_point(self):
+        '''Add CPA point.'''
         self.add_column('cpa_pointm', 'POINTM', geometry=True)
-        sql_pointm = """
+        sql = """
             UPDATE {0}
             SET {1} = ST_Force3DM(cpa_point)
         """.format(self.table, 'cpa_pointm')
+        self.cur.execute(sql)
+        self.conn.commit()
 
+    def interaction_track_points(self):
+        '''Add track points.'''
         self.add_column('own_point', 'POINTM', geometry=True)
         self.add_column('target_point', 'POINTM', geometry=True)
-        sql_point = """
+        sql = """
             UPDATE {0}
             SET {1} = ST_Force3DM(
                 ST_GeometryN(
@@ -577,23 +588,92 @@ class Interactions_Table(Postgres_Table):
                 1)
             )
         """
-        self.cur.execute(sql_point.format(self.table, 'own_point', 'own_track'))
-        self.cur.execute(sql_point.format(self.table, 'target_point', 'target_track'))
+        self.cur.execute(sql.format(self.table, 'own_point', 'own_track'))
+        self.cur.execute(sql.format(self.table, 'target_point', 'target_track'))
+        self.conn.commit()
 
+    def interaction_cpa_time(self):
+        '''Add track time.'''
         self.add_column('cpa_time', 'TIMESTAMP', geometry=False)
-        sql_time = """
+        sql = """
             UPDATE {0}
             SET {1} = to_timestamp(cpa_point)
         """.format(self.table, 'cpa_time')
-        self.cur.execute(sql_time)
-
-        self.add_column('point_distance', 'FLOAT(4)', geometry=False)
-        sql_distance = """
-            UPDATE {0}
-            SET {1} = ST_Distance(own_point::geography, target_point::geography)
-        """.format(self.table, 'point_distance')
-        self.cur.execute(sql_distance)
+        self.cur.execute(sql)
         self.conn.commit()
+
+    def interaction_cpa_distance(self):
+        '''Add track points.'''
+        self.add_column('point_distance', 'FLOAT(4)', geometry=False)
+        sql = """
+            UPDATE {0}
+            SET {1} = ST_Distance(own_point::geometry, target_point::geometry)
+        """.format(self.table, 'point_distance')
+        self.cur.execute(sql)
+        self.conn.commit()
+
+    def interaction_cpa_azimuth(self):
+        '''Add azimuth between own_point and target_point, sitll need own ship heading.'''
+        self.add_column('azimuth', 'FLOAT(4)', geometry=False)
+        sql = """
+            UPDATE {0}
+            SET {1} = DEGREES(ST_Azimuth(own_point, target_point)) AS azimuth_deg
+        """.format(self.table, 'azimuth')
+
+class Analysis_Table(Postgres_Table):
+    def __init__(self, conn, table, input_points, input_cpa):
+        '''Connect to default database.'''
+        super(Analysis_Table, self).__init__(conn, table)
+        self.cur = self.conn.cursor()
+        self.points = input_points
+        self.cpa = input_cpa
+
+    def join_points_cpa(self):
+        '''Make pairs of tracks that happen in same time interval.'''
+        print('Joining nais_tracks with itself to make interaction table...')
+        sql = """
+            CREATE TABLE {0} AS
+            SELECT
+                p.mmsi,
+                p.basedatetime,
+                p.track_mmsi,
+                p.sog,
+                p.cog,
+                p.heading,
+                p.step_rot,
+                p.step_acceleration,
+                p.vesselname,
+                p.vesseltype,
+                p.length,
+                p.width,
+                p.draft,
+                p.tss,
+                c.target_mmsi,
+                c.target_trackid,
+                c.cpa_point,
+                c.cpa_distance,
+                c.cpa_time,
+                c.cpa_azimuth
+            FROM {1} n1 LEFT JOIN {2} n2
+            ON p.basedatetime between c.cpa_time - INTERVAL '10 minutes' c.cpa_time + INTERVAL '10 minutes'
+            AND p.mmsi == c.own_mmsi
+            AND p.track_mmsi == c.own_trackid
+            ORDER BY cpa_distance ASC
+        """.format(self.table, self.input, self.input)
+        self.cur.execute(sql)
+        self.conn.commit()
+
+    # def get_bearing(self):
+    #     return
+
+
+
+
+
+
+
+
+
 
 
 # -----------------------------------------------------------------------------
