@@ -139,12 +139,12 @@ class NAIS_Database(object):
         start = time.time()
         try:
             # Environmental
-            # self.build_shore()
-            # self.build_tss()
-            # self.build_grid()
+            self.build_shore()
+            self.build_tss()
+            self.build_grid()
 
             # Points
-            # self.build_nais_points()
+            self.build_nais_points()
 
             # Tracks
             self.build_nais_tracks()
@@ -163,7 +163,7 @@ class NAIS_Database(object):
             self.conn.rollback()
             self.conn.close()
         finally:
-            # shutil.rmtree(self.root)
+            shutil.rmtree(self.root)
             end = time.time()
             print('Elapsed Time: {0} minutes'.format((end-start)/60))
 
