@@ -192,7 +192,7 @@ class NAIS_Dataframe(object):
         self.mark_segment()
 
     def add_evasive_data(self):
-        '''Save output to be read into PostgreSQL.'''
+        '''Add changes in speed and course.'''
         self.step_acceleration()
         self.step_cog()
         self.step_rot()
