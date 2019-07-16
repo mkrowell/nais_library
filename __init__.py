@@ -244,7 +244,10 @@ def time_this(original_function):
         before = datetime.datetime.now()
         x = original_function(*args,**kwargs)
         after = datetime.datetime.now()
-        print("Elapsed Time = {0}".format(after-before))
+        print("Method {0}: Elapsed Time = {1}".format(
+            original_function.__name__,
+            after-before)
+        )
         return x
     return time_this_wrapper
 
@@ -271,6 +274,20 @@ def time_all(Cls):
             else:
                 return x
     return DecoratedClass
+
+
+# ------------------------------------------------------------------------------
+# DATAFRAMES
+# ------------------------------------------------------------------------------
+def concat_df(func, iterateList, *args, **kwargs):
+    '''
+    Return a concated dataframe made of list of dataframes obtained using func.
+    '''
+    dfs = list()
+    for item in iterateList:
+        df = func(item, *args, **kwargs)
+        dfs.append(df)
+    return pd.concat(dfs, sort = False)
 
 
 # ------------------------------------------------------------------------------
