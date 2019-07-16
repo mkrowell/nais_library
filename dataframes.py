@@ -17,10 +17,14 @@ import geopy.distance
 import math
 import matplotlib.pyplot as plt
 import numpy as np
+from os.path import basename, dirname, join
 import pandas as pd
 import seaborn as sns
+sns.set_palette("Set1")
+sns.set_context("paper", font_scale=3)
+sns.axes_style("darkgrid")
 
-from . import check_length, print_reduction, time_all
+from . import check_length, print_reduction, time_all, concat_df
 
 
 # ------------------------------------------------------------------------------
@@ -57,41 +61,6 @@ def azimuth(lat1, lon1, lat2, lon2):
 # ------------------------------------------------------------------------------
 # DATAFRAMES
 # ------------------------------------------------------------------------------
-class Sector_Dataframe(object):
-
-    def __init__(self, lonmin, lonmax, latmin, latmax, stepsize):
-        '''Make sector dataframe.'''
-        self.grid_df = pd.DataFrame(columns=['MinLon', 'MinLat', 'MaxLon', 'MaxLat'])
-
-        # spatial parameters
-        self.lonMin = lonmin
-        self.lonMax = lonmax
-        self.latMin = latmin
-        self.latMax = latmax
-        self.stepSize = stepsize
-        self.lon = np.arange(self.lonMin, self.lonMax + self.stepSize, self.stepSize)
-        self.lat = np.arange(self.latMin, self.latMax + self.stepSize, self.stepSize)
-
-
-    def grid(self, array, i):
-        '''Construct grid.'''
-        index_grid = str(i).zfill(2)
-        min = round(array[i],2)
-        max = round(array[i+1],2)
-        return index_grid, min, max
-
-    def generate_df(self):
-        '''Add spatial sector ID.'''
-        for x in range(len(self.lon)-1):
-            ilon, min_lon, max_lon = self.grid(self.lon, x)
-            for y in range(len(self.lat)-1):
-                ilat, min_lat, max_lat = self.grid(self.lat, y)
-
-                index  = "{0}.{1}".format(ilon, ilat)
-                index_row = [min_lon, min_lat, max_lon, max_lat]
-                self.grid_df.loc[index] = index_row
-        return self.grid_df
-
 @time_all
 class NAIS_Dataframe(object):
 
@@ -100,9 +69,9 @@ class NAIS_Dataframe(object):
     additional derived columns to help in later analysis.
     '''
 
-    def __init__(self, csvFile, lonMin, lonMax, latMin, latMax):
+    def __init__(self, csvFiles, lonMin, lonMax, latMin, latMax):
         '''Process nais dataframe.'''
-        self.csv = csvFile
+        self.csvs = csvFiles
         self.lonMin = lonMin
         self.lonMax = lonMax
         self.latMin = latMin
@@ -120,9 +89,7 @@ class NAIS_Dataframe(object):
             'VesselType',
             'Status',
             'Length',
-            'Width',
-            'Draft',
-            'Cargo'
+            'Width'
         ]
         self.headers_required = [
             'MMSI',
@@ -133,10 +100,17 @@ class NAIS_Dataframe(object):
             'COG',
             'VesselType'
         ]
-
-        self.df = pd.read_csv(self.csv, usecols=self.headers)
+        self.df = concat_df(pd.read_csv, self.csvs, usecols=self.headers)
         self.df['BaseDateTime'] = pd.to_datetime(self.df['BaseDateTime'])
         self.df.sort_values(['MMSI','BaseDateTime'], inplace=True)
+
+        self.df['Status'].replace(np.nan, "undefined", inplace=True)
+        self.df['Status'] = self.df['Status'].astype('category')
+
+        # Normalize COG
+        self.normalize_angle('COG', 0, 360)
+        self.df.drop(columns='COG', inplace=True)
+        self.df.rename(columns={'COG_Normalized':'COG'}, inplace=True)
 
 
     # PROPERTIES ---------------------------------------------------------------
@@ -147,7 +121,7 @@ class NAIS_Dataframe(object):
 
     @property
     def grouped_time(self):
-        '''Return sorted dataframe grouped by MMSI and Time Track.'''
+        '''Return sorted dataframe grouped by MMSI and Track.'''
         return self.df.sort_values(
             ['MMSI', 'Track', 'BaseDateTime']
         ).groupby(
@@ -157,56 +131,68 @@ class NAIS_Dataframe(object):
 
     # MAIN FUNCTIONS -----------------------------------------------------------
     @print_reduction
-    def clean(self):
+    def clean(self, sensitivity=0.15, maxJump=4):
         '''Clean bad or unneccessary data from dataframe.'''
-        # Handle keys
-        self.drop_bad_mmsi()
-        self.drop_duplicate_keys()
-
-        # Drop out of scope or missing data
         self.drop_spatial()
         self.drop_null()
+        self.drop_bad_mmsi()
+        self.drop_duplicate_keys()
+        self.drop_bad_speed()
+        self.drop_bad_heading()
         self.drop_vessel_types()
 
-        # Drop invalid data
-        self.drop_bad_speed()
-
-        # Drop sparse data
-        self.drop_sparse_mmsi()
-
-        # Types
-        self.normalize_cog()
-        self.cast_columns()
-
-    def split_mmsi_jump(self, maxJump=4, sensitivty=0.35):
-        '''Split MMSI data over large time and distance gaps.'''
+        # add check columns
+        self.point_cog()
         self.step_time()
         self.step_distance()
         self.expected_distance()
-        self.dump_bad_distance(sensitivty)
+
+        # drop suspicious data
+        self.drop_bad_distance(sensitivity)
         self.mark_time_jump(maxJump)
-        self.dump_jump_string()
+        self.drop_jump_string()
+        self.drop_bad_cog()
 
     def split_mmsi_stop(self, maxTime=2):
+        '''Split tracks into stopped and moving segments.'''
         self.mark_stop(maxTime)
+        self.drop_stops()
+
+        self.step_time()
+        self.mark_time_jump(maxJump=4)
         self.mark_segment()
+        self.drop_sparse_track()
 
     def add_evasive_data(self):
         '''Add changes in speed and course.'''
         self.step_acceleration()
         self.step_cog()
-        self.step_rot()
-
+        self.step_heading()
+    
     def save_output(self):
         '''Save output to be read into PostgreSQL.'''
         self.validate_types()
+        self.normalize_time()
         self.reorder_output()
 
 
     # CLEAN DATA ---------------------------------------------------------------
     @print_reduction
+    def drop_spatial(self):
+        '''Limit to area of interest's bounding box.'''
+        self.df = self.df[self.df['LON'].between(self.lonMin, self.lonMax)].copy()
+        self.df = self.df[self.df['LAT'].between(self.latMin, self.latMax)].copy()
+
+    @print_reduction
+    def drop_null(self):
+        '''Drop rows with nulls in the required columns.'''
+        for col in self.headers_required:
+            self.df[col].replace("", np.nan, inplace=True)
+        self.df.dropna(how='any', subset=self.headers_required, inplace=True)
+
+    @print_reduction
     def drop_bad_mmsi(self):
-        '''MMSI numbers should be 9 digits.'''
+        '''MMSI numbers should be 9 digits and between a given range.'''
         condLen = self.df['MMSI'].apply(lambda x: len(str(x)) == 9)
         self.df = self.df[condLen].copy()
 
@@ -223,27 +209,63 @@ class NAIS_Dataframe(object):
         )
 
     @print_reduction
-    def drop_null(self):
-        '''''Drop rows with nulls in the required columns.'''
-        for col in self.headers_required:
-            self.df[col].replace("", np.nan, inplace=True)
-        self.df.dropna(how='any', subset=self.headers_required, inplace=True)
-
-    @print_reduction
-    def drop_spatial(self):
-        '''Limit to area of interest's bounding box.'''
-        self.df = self.df[self.df['LON'].between(
-            self.lonMin, self.lonMax, inclusive=False
-        )].copy()
-        self.df = self.df[self.df['LAT'].between(
-            self.latMin, self.latMax, inclusive=False
-        )].copy()
-
-    @print_reduction
     def drop_vessel_types(self):
-        '''Remove non-vessel and uscg'.'''
-        bad_codes = [1008, 1009, 1018]
-        self.df = self.df[~self.df['VesselType'].isin(bad_codes)].copy()
+        '''Map codes to categories.'''
+        types = {
+            30: 'fishing',
+            31: 'tug',
+            32: 'tug',
+            35: 'recreational',
+            36: 'recreational',
+            50: 'pilot',
+            52: 'tug',
+            60: 'passenger',
+            61: 'passenger',
+            62: 'passenger',
+            63: 'passenger',
+            64: 'passenger',
+            65: 'passenger',
+            66: 'passenger',
+            67: 'passenger',
+            68: 'passenger',
+            69: 'passenger',
+            70: 'cargo',
+            71: 'cargo',
+            72: 'cargo',
+            73: 'cargo',
+            74: 'cargo',
+            75: 'cargo',
+            76: 'cargo',
+            77: 'cargo',
+            78: 'cargo',
+            79: 'cargo',
+            80: 'tanker',
+            81: 'tanker',
+            82: 'tanker',
+            83: 'tanker',
+            84: 'tanker',
+            85: 'tanker',
+            86: 'tanker',
+            87: 'tanker',
+            88: 'tanker',
+            89: 'tanker',
+            1001: 'fishing',
+            1002: 'fishing',
+            1003: 'cargo',
+            1004: 'cargo',
+            1012: 'passenger',
+            1014: 'passenger',
+            1016: 'cargo',
+            1017: 'tanker',
+            1019: 'recreational',
+            1023: 'tug',
+            1024: 'tanker',
+            1025: 'tug'
+        }
+        codes = list(types.keys())
+        self.df = self.df[self.df['VesselType'].isin(codes)].copy()
+        self.df['VesselType'] = self.df['VesselType'].map(types)
+        self.df['VesselType'] = self.df['VesselType'].astype('category')
 
     @print_reduction
     def drop_bad_speed(self):
@@ -252,20 +274,34 @@ class NAIS_Dataframe(object):
         self.df = self.df[~self.df['MMSI'].isin(bad_mmsi)].copy()
 
     @print_reduction
-    def drop_sparse_mmsi(self):
-        '''Remove MMSIs that have less than 50 data points.'''
-        self.df = self.df.groupby(['MMSI']).filter(lambda g: len(g) >= 2)
+    def drop_bad_heading(self):
+        '''Drop undefined heading.'''
+        self.df['Heading'].replace(511, np.nan, inplace=True)
+        self.df.dropna(how='any', subset=['Heading'], inplace=True)
 
-    def normalize_cog(self):
-        '''Normalize COG to be between 0 and 360.'''
-        self.normalize_angle('COG', 0, 360)
+    def point_cog(self):
+        '''Calculate the course between two position points.'''
+        def course(df):
+            df.reset_index(inplace=True)
+            df['Point_COG'] = azimuth(
+                df['LAT'].shift(),
+                df['LON'].shift(),
+                df.loc[1:,'LAT'],
+                df.loc[1:,'LON']
+            )
+            return df.set_index('index')
+        self.df = self.grouped_mmsi.apply(course)
+        self.df['Point_COG'].fillna(method='bfill', inplace=True)
+        self.normalize_angle('Point_COG', 0, 360)
+        self.df.drop(columns=['Point_COG'], inplace=True)
+        self.df.rename(columns={'Point_COG_Normalized': 'Point_COG'}, inplace=True)
 
-    def cast_columns(self):
-        for col in ['VesselType', 'Cargo', 'Status']:
-            self.df[col].astype('category')
+    @print_reduction
+    def drop_bad_cog(self):
+        '''Remove bad COG recordings.'''
+        self.df['Error_COG'] = abs(self.df['COG'] - self.df['Point_COG'])
+        self.df = self.df[self.df['Error_COG']<5].copy()
 
-
-    # AIS JUMPS ----------------------------------------------------------------
     def step_time(self):
         '''Return time between timestamps.'''
         self.df['Step_Time'] = self.grouped_mmsi['BaseDateTime'].diff()
@@ -276,7 +312,7 @@ class NAIS_Dataframe(object):
         '''Return distance between timestamps.'''
         def distance(df):
             df.reset_index(inplace=True)
-            df['Step_Distance'] =  haversine(
+            df['Step_Distance'] = haversine(
                 df['LAT'].shift(),
                 df['LON'].shift(),
                 df.loc[1:,'LAT'],
@@ -290,29 +326,27 @@ class NAIS_Dataframe(object):
         self.df['Expected_Distance'] = self.df['SOG']*self.df['Step_Time']/3600
 
     @print_reduction
-    def dump_bad_distance(self, sensitivity):
+    def drop_bad_distance(self, sensitivity):
         '''Drop distances outside expected values.'''
-        # Max distance is straight line at speed over time
-        # Can be less if it is not going straight
-        high = 1 + sensitivity
-        cond_distance = self.df['Step_Distance'] > high*self.df['Expected_Distance']
-        # At infrequent time intervals, speed is ~0 and distance is less reliable
+        max = (1 + sensitivity)*self.df['Expected_Distance']
+        cond_distance = self.df['Step_Distance'] > max
+        # At infrequent time intervals, speed is ~0, distance is less reliable
         cond_time = self.df['Step_Time'] < 120
-        self.df['Dump'] = np.where((cond_distance) & (cond_time),1,0)
-        self.df = self.df[self.df['Dump']==0].copy()
-        self.df.drop(columns=['Expected_Distance', 'Dump'], inplace=True)
+        self.df['Drop'] = np.where((cond_distance) & (cond_time), 1, 0)
+
+        self.df = self.df[self.df['Drop']==0].copy()
+        self.df.drop(columns=['Drop'], inplace=True)
 
     def mark_time_jump(self, maxJump):
         '''Mark points with large time jump.'''
         def mark(df):
             df.reset_index(inplace=True)
-            df['Time_Jump'] = np.where(
-                df['Step_Time'] > maxJump*60, 1, 0)
+            df['Time_Jump'] = np.where(df['Step_Time'] > maxJump*60, 1, 0)
             return df.set_index('index')
         self.df = self.grouped_mmsi.apply(mark)
 
     @print_reduction
-    def dump_jump_string(self):
+    def drop_jump_string(self):
         '''Drop consecutive time jumps.'''
         self.df['Jump_String'] = np.where(
             (self.df['Time_Jump'] == 1) & (self.df['Time_Jump'].shift() == 1),
@@ -320,84 +354,92 @@ class NAIS_Dataframe(object):
             0
         )
         self.df = self.df[self.df['Jump_String'] == 0].copy()
-        self.df['Step_Time'] = np.where(
-            self.df['Time_Jump'] == 1, np.nan, self.df['Step_Time'])
-        self.df['Step_Distance'] = np.where(
-            self.df['Time_Jump'] == 1, np.nan, self.df['Step_Distance'])
         self.df.drop(columns=['Jump_String'], inplace=True)
 
-
+        for col in ['Step_Time', 'Step_Distance']:
+            self.df[col] = np.where(self.df['Time_Jump'] == 1,
+                self.df[col].shift(),
+                self.df[col]
+            )
 
 
     # STOPS --------------------------------------------------------------------
     def mark_stop(self, maxTime=2):
         '''Assign status 'stop' to a point if it satisfies criteria'''
-        cond = (self.df['Step_Time'] > maxTime*60)
-        self.df['Stop'] = np.where(cond, 1, 0)
+        # Transmission frequency over 2 minutes
+        cond_time = (self.df['Step_Time'] > maxTime*60)
+        cond_speed = (self.df['SOG'] == 0)
+        self.df['Stop'] = np.where(cond_time | cond_speed, 1, 0)
+
+        # Status is stopped
+        status_stop = ['not under command', 'at anchor', 'moored', 'aground']
+        self.df['Stop'] = np.where(
+            self.df['Status'].isin(status_stop),
+            1,
+            self.df['Stop']
+        )
+
+    @print_reduction
+    def drop_stops(self):
+        '''Drop stops.'''
+        self.df = self.df[self.df['Stop']==0].copy()
 
     def mark_segment(self):
         '''Assign an id to points .'''
-        self.df['Stop_Change'] = abs(self.grouped_mmsi['Stop'].diff()).fillna(0)
-        self.df['Break'] = self.df['Time_Jump'] + self.df['Stop_Change']
-        self.df['Track'] = self.grouped_mmsi['Break'].cumsum()
-        self.df.drop(columns=['Time_Jump', 'Stop_Change', 'Break'], inplace=True)
+        self.df['Track'] = self.grouped_mmsi['Time_Jump'].cumsum()
+        self.df['Track'] = self.df['Track'].astype(int)
+        self.df.drop(columns=['Time_Jump'], inplace=True)
+        self.df.sort_values(['MMSI', 'Track', 'BaseDateTime'], inplace=True)
+
+    @print_reduction
+    def drop_sparse_track(self):
+        '''Remove MMSIs that have less than 30 data points.'''
+        grouped =  self.df.groupby(['MMSI', 'Track'])
+        self.df = grouped.filter(lambda g: g['SOG'].mean() >= 2)
+        self.df = grouped.filter(lambda g: len(g) >= 30)
 
 
-    # CHANGE IN COURSE SPEED ---------------------------------------------------
+    # STEP CALCULATIONS --------------------------------------------------------
     def step_acceleration(self):
         '''Add acceleration field.'''
-        self.df['DS'] = self.grouped_time['SOG'].diff().fillna(0)
+        self.df['DS'] = self.grouped_mmsi['SOG'].diff()
         self.df['Step_Acceleration'] = 3600*self.df['DS'].divide(
-            self.df['Step_Time'], fill_value=np.inf
-        )
+            self.df['Step_Time'], fill_value=0)
         self.df.drop(columns=['DS'], inplace=True)
+        self.df['Step_Acceleration'].fillna(method='bfill', inplace=True)
 
-    @check_length
     def step_cog(self):
-        '''Calculate the relative net displacement between rows.'''
-        def course(df):
-            df.reset_index(inplace=True)
-            df['Step_COG'] = azimuth(
-                df['LAT'].shift(),
-                df['LON'].shift(),
-                df.loc[1:,'LAT'],
-                df.loc[1:,'LON']
-            )
-            return df.set_index('index')
-        self.df = self.grouped_mmsi.apply(course)
+        '''Calculate change in course.'''
+        self.normalize_angle_diff('COG', 0, 360)
+        self.df['COG_Difference'].fillna(method='bfill', inplace=True)
+        self.df.rename(columns={'COG_Difference': 'Step_COG'}, inplace=True)
+        self.df['COG_Cosine'] = np.cos(np.radians(self.df['Step_COG']))
 
-        self.normalize_angle('Step_COG', 0, 360)
-        self.df.drop(columns=['COG'], inplace=True)
-
-    def step_rot(self):
-        '''Add ROT field.'''
-        self.normalize_angle_diff('Step_COG', -180, 180)
-        self.df['Step_COG_Difference'].fillna(0, inplace=True)
-        # self.df['Step_ROT'] = 60*self.df['Step_COG_Difference'].divide(
-        #     self.df['Step_Time'], fill_value=np.inf
-        # )
-        self.df['Step_ROT'] = 60*self.df['Step_COG_Difference'].divide(
-            self.df['Step_Time'])
-        self.df.drop(columns=['step_COG', 'Step_COG_Difference'], inplace=True)
+    def step_heading(self):
+        '''Calculate change in course.'''
+        self.normalize_angle_diff('Heading', 0, 360)
+        self.df['Heading_Difference'].fillna(method='bfill', inplace=True)
+        self.df.rename(columns={'Heading_Difference': 'Step_Heading'}, inplace=True)
+        self.df['Heading_Cosine'] = np.cos(np.radians(self.df['Step_Heading']))
 
 
     # PREP FOR POSTGRES --------------------------------------------------------
     def validate_types(self):
         '''Cast to correct data types.'''
-        # Replace empty elements with -1
-        cols_null = list(set(self.df.columns.tolist()) - set(self.headers_required))
-        for col in cols_null:
+        cols_float = ['Length', 'Width']
+        for col in cols_float:
             self.df[col].fillna(-1, inplace=True)
+            self.df[col] = self.df[col].astype(float)
 
-        # Handle string columns
-        self.df['Status'].replace(-1, "undefined", inplace=True)
-        self.df['VesselName'].replace(-1, "undefined", inplace=True)
-
-        # Handle int columns
-        self.df['Heading'].replace(511, -1, inplace=True)
-        cols_int = ['VesselType', 'Cargo', 'Track']
-        for col in cols_int:
-            self.df[col] = self.df[col].astype(int)
+    @print_reduction
+    def normalize_time(self):
+        '''Round time to nearest minute.'''
+        self.df['BaseDateTime'] = self.df['BaseDateTime'].dt.round('1min')
+        self.df.drop_duplicates(
+            subset=['MMSI', 'BaseDateTime'],
+            keep='first',
+            inplace=True
+        )
 
     def reorder_output(self):
         '''Save processed df to csv file.'''
@@ -405,48 +447,28 @@ class NAIS_Dataframe(object):
             'MMSI',
             'BaseDateTime',
             'Track',
-            'Stop',
-            'Step_ROT',
+            'Step_COG',
+            'COG_Cosine',
+            'Heading_Cosine',
             'Step_Acceleration',
             'LAT',
             'LON',
             'SOG',
-            'COG_Normalized',
-            'Step_COG_Normalized',
+            'COG',
+            'Point_COG',
             'Heading',
-            'Step_Time',
-            'Step_Distance',
             'VesselName',
             'VesselType',
             'Status',
             'Length',
-            'Width',
-            'Draft',
-            'Cargo'
+            'Width'
         ]
-        output = self.df.reindex(order, axis="columns")
-        output.to_csv(self.csv, index=False, header=False)
-
-
-    # VALIDITY -----------------------------------------------------------------
-    def plot_hist(self, column):
-        '''Plot time lag.'''
-        plt.style.use(['ggplot'])
-        fig = plt.figure()
-        plt.title('{0} Histogram'.format(column))
-        plt.xlabel(column)
-        plt.ylabel('Frequency')
-        plt.hist(self.df['column'], color='dodgerblue')
-        plt.show()
-
-        # df.df['Step_ROT'].hist(by=df.df['VesselType'])
-
-    def step_sog(self):
-        '''Caclulate the speed required for step distacnce.'''
-        self.df['Step_SOG'] = 3600 * self.df['Step_Distance']/self.df['Step_Time']
-        self.df['Error_SOG'] = self.df['Step_SOG'].divide(
-            self.df['SOG'],
-            fill_value = 0) - 1
+        output = self.df[order].copy()
+        output.to_csv(
+            join(dirname(self.csvs[0]), 'AIS_All.csv'),
+            index=False,
+            header=False
+        )
 
 
     # HELPER FUNCTIONS ---------------------------------------------------------
@@ -459,29 +481,10 @@ class NAIS_Dataframe(object):
 
     def normalize_angle_diff(self, column, start, end):
         '''Normalized an angle to be within the start and end.'''
-        self.df['Difference'] = self.grouped_time[column].diff()
+        self.df['Difference'] = self.grouped_mmsi[column].diff()
         width = end - start
         offset = self.df['Difference'] - start
         name = '{0}_Difference'.format(column)
         self.df[name] = offset - np.floor(offset/width)*width + start
         self.df.drop(columns=['Difference'], inplace=True)
 
-
-@time_all
-class Analysis_Dataframe(object):
-
-    def __init__(self, df):
-        self.df = df
-
-    @property
-    def grouped_track(self):
-        return self.df.sort_values(
-            ['mmsi', 'own_trackid', 'basedatetime']
-        ).groupby(
-            groupBy
-        )
-
-    def split_straight_maneuver(self):
-        '''put a 1 if accel > 2 or if rot > 10'''
-        # First do analysis of range of values
-        return
