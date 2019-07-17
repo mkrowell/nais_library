@@ -285,6 +285,7 @@ def concat_df(func, iterateList, *args, **kwargs):
     '''
     dfs = list()
     for item in iterateList:
+        print('Concatenating {0}...'.format(item))
         df = func(item, *args, **kwargs)
         dfs.append(df)
     return pd.concat(dfs, sort = False)
