@@ -12,9 +12,6 @@
 # ------------------------------------------------------------------------------
 # IMPORTS
 # ------------------------------------------------------------------------------
-from geographiclib.geodesic import Geodesic
-import geopy.distance
-import math
 import matplotlib.pyplot as plt
 import numpy as np
 from os.path import basename, dirname, join
@@ -56,6 +53,14 @@ def azimuth(lat1, lon1, lat2, lon2):
     y = np.sin(lon2 - lon1) * np.cos(lat2)
     x = np.cos(lat1)*np.sin(lat2)-np.sin(lat1)*np.cos(lat2)*np.cos(lon2 - lon1)
     return np.degrees(np.arctan2(y, x))
+
+def angle_difference(angle1, angle2):
+    '''Return the signed difference between two angles.'''
+    angle1 = np.radians(angle1)
+    angle2 = np.radians(angle2)
+    y = np.sin(angle1 - angle2)
+    x = np.cos(angle1 - angle2)
+    return np.arctan2(y, x)
 
 
 # ------------------------------------------------------------------------------
@@ -121,7 +126,7 @@ class NAIS_Dataframe(object):
 
     @property
     def grouped_time(self):
-        '''Return sorted dataframe grouped by MMSI and Track.'''
+        '''Return sorted dataframe grouped by MMSI and Time Track.'''
         return self.df.sort_values(
             ['MMSI', 'Track', 'BaseDateTime']
         ).groupby(
@@ -151,7 +156,6 @@ class NAIS_Dataframe(object):
         self.drop_bad_distance(sensitivity)
         self.mark_time_jump(maxJump)
         self.drop_jump_string()
-        self.drop_bad_cog()
 
     def split_mmsi_stop(self, maxTime=2):
         '''Split tracks into stopped and moving segments.'''
@@ -168,7 +172,7 @@ class NAIS_Dataframe(object):
         self.step_acceleration()
         self.step_cog()
         self.step_heading()
-    
+
     def save_output(self):
         '''Save output to be read into PostgreSQL.'''
         self.validate_types()
@@ -212,12 +216,8 @@ class NAIS_Dataframe(object):
     def drop_vessel_types(self):
         '''Map codes to categories.'''
         types = {
-            30: 'fishing',
             31: 'tug',
             32: 'tug',
-            35: 'recreational',
-            36: 'recreational',
-            50: 'pilot',
             52: 'tug',
             60: 'passenger',
             61: 'passenger',
@@ -249,15 +249,12 @@ class NAIS_Dataframe(object):
             87: 'tanker',
             88: 'tanker',
             89: 'tanker',
-            1001: 'fishing',
-            1002: 'fishing',
             1003: 'cargo',
             1004: 'cargo',
             1012: 'passenger',
             1014: 'passenger',
             1016: 'cargo',
             1017: 'tanker',
-            1019: 'recreational',
             1023: 'tug',
             1024: 'tanker',
             1025: 'tug'
@@ -301,6 +298,11 @@ class NAIS_Dataframe(object):
         '''Remove bad COG recordings.'''
         self.df['Error_COG'] = abs(self.df['COG'] - self.df['Point_COG'])
         self.df = self.df[self.df['Error_COG']<5].copy()
+
+    @print_reduction
+    def drop_sparse_mmsi(self):
+        '''Remove MMSIs that have less than 5 data points.'''
+        self.df = self.df.groupby(['MMSI']).filter(lambda g: len(g) >= 5)
 
     def step_time(self):
         '''Return time between timestamps.'''
@@ -410,17 +412,17 @@ class NAIS_Dataframe(object):
 
     def step_cog(self):
         '''Calculate change in course.'''
-        self.normalize_angle_diff('COG', 0, 360)
-        self.df['COG_Difference'].fillna(method='bfill', inplace=True)
-        self.df.rename(columns={'COG_Difference': 'Step_COG'}, inplace=True)
-        self.df['COG_Cosine'] = np.cos(np.radians(self.df['Step_COG']))
-
-    def step_heading(self):
-        '''Calculate change in course.'''
-        self.normalize_angle_diff('Heading', 0, 360)
-        self.df['Heading_Difference'].fillna(method='bfill', inplace=True)
-        self.df.rename(columns={'Heading_Difference': 'Step_Heading'}, inplace=True)
-        self.df['Heading_Cosine'] = np.cos(np.radians(self.df['Step_Heading']))
+        def delta_course(df):
+            df.reset_index(inplace=True)
+            df['Step_COG_Radians'] = angle_difference(
+                df['Point_COG'].shift(),
+                df.loc[1:,'Point_COG']
+            )
+            return df.set_index('index')
+        self.df = self.grouped_mmsi.apply(delta_course)
+        self.df['Step_COG_Radians'].fillna(method='bfill', inplace=True)
+        self.df['COG_Cosine'] = np.cos(self.df['Step_COG_Radians'])
+        self.df['Step_COG_Degrees'] = np.degrees(self.df['Step_COG_Radians'])
 
 
     # PREP FOR POSTGRES --------------------------------------------------------
@@ -447,9 +449,9 @@ class NAIS_Dataframe(object):
             'MMSI',
             'BaseDateTime',
             'Track',
-            'Step_COG',
+            'Step_COG_Degrees',
+            'Step_COG_Radians',
             'COG_Cosine',
-            'Heading_Cosine',
             'Step_Acceleration',
             'LAT',
             'LON',
@@ -479,12 +481,4 @@ class NAIS_Dataframe(object):
         name = '{0}_Normalized'.format(column)
         self.df[name] = offset - np.floor(offset/width)*width + start
 
-    def normalize_angle_diff(self, column, start, end):
-        '''Normalized an angle to be within the start and end.'''
-        self.df['Difference'] = self.grouped_mmsi[column].diff()
-        width = end - start
-        offset = self.df['Difference'] - start
-        name = '{0}_Difference'.format(column)
-        self.df[name] = offset - np.floor(offset/width)*width + start
-        self.df.drop(columns=['Difference'], inplace=True)
 
