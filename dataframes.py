@@ -404,7 +404,7 @@ class NAIS_Dataframe(object):
     # STEP CALCULATIONS --------------------------------------------------------
     def step_acceleration(self):
         '''Add acceleration field.'''
-        self.df['DS'] = self.grouped_mmsi['SOG'].diff()
+        self.df['DS'] = self.grouped_time['SOG'].diff()
         self.df['Step_Acceleration'] = 3600*self.df['DS'].divide(
             self.df['Step_Time'], fill_value=0)
         self.df.drop(columns=['DS'], inplace=True)
@@ -419,7 +419,7 @@ class NAIS_Dataframe(object):
                 df.loc[1:,'Point_COG']
             )
             return df.set_index('index')
-        self.df = self.grouped_mmsi.apply(delta_course)
+        self.df = self.grouped_time.apply(delta_course)
         self.df['Step_COG_Radians'].fillna(method='bfill', inplace=True)
         self.df['COG_Cosine'] = np.cos(self.df['Step_COG_Radians'])
         self.df['Step_COG_Degrees'] = np.degrees(self.df['Step_COG_Radians'])
