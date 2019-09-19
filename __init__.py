@@ -205,6 +205,31 @@ def extract_file(filepath, destination):
 
 
 # ------------------------------------------------------------------------------
+# VALUES
+# ------------------------------------------------------------------------------
+def snap_value(value, l, u):
+    return min([l,u], key=lambda x:abs(x-value))
+
+def buffer_bounds(bound_l, bound_u, offset):
+    return bound_l-offset, bound_u+offset
+
+
+# ------------------------------------------------------------------------------
+# DATAFRAMES
+# ------------------------------------------------------------------------------
+def concat_df(func, iterateList, *args, **kwargs):
+    '''
+    Return a concated dataframe made of list of dataframes obtained using func.
+    '''
+    dfs = list()
+    for item in iterateList:
+        print('Concatenating {0}...'.format(item))
+        df = func(item, *args, **kwargs)
+        dfs.append(df)
+    return pd.concat(dfs, sort = False)
+
+
+# ------------------------------------------------------------------------------
 # DECORATORS
 # ------------------------------------------------------------------------------
 def print_reduction(original_function):
@@ -274,21 +299,6 @@ def time_all(Cls):
             else:
                 return x
     return DecoratedClass
-
-
-# ------------------------------------------------------------------------------
-# DATAFRAMES
-# ------------------------------------------------------------------------------
-def concat_df(func, iterateList, *args, **kwargs):
-    '''
-    Return a concated dataframe made of list of dataframes obtained using func.
-    '''
-    dfs = list()
-    for item in iterateList:
-        print('Concatenating {0}...'.format(item))
-        df = func(item, *args, **kwargs)
-        dfs.append(df)
-    return pd.concat(dfs, sort = False)
 
 
 # ------------------------------------------------------------------------------
