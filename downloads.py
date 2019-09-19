@@ -12,6 +12,7 @@
 # ------------------------------------------------------------------------------
 # IMPORTS
 # ------------------------------------------------------------------------------
+from glob import glob
 import io
 from multiprocessing.dummy import Pool
 import os
@@ -104,6 +105,8 @@ class NAIS_Download(object):
         self.url = 'https://coast.noaa.gov/htdata/CMSP/AISDataHandler/{0}/AIS_{1}_{2}_Zone{3}.zip'
         self.download_dir = join(self.root, 'AIS_ASCII_by_UTM_Month')
 
+        self.df = None
+
     @retry(stop_max_attempt_number=7)
     def download_nais(self, month):
         '''Download zip file and extract to temp directory.'''
@@ -126,17 +129,36 @@ class NAIS_Download(object):
         if exists(self.download_dir):
             shutil.rmtree(self.download_dir)
 
-    def preprocess_nais(self, month):
+    def preprocess_eda(self):
         '''Add derived fields and validate data types.'''
-        csv = join(self.root, self.name.format(self.year, month, self.zone))
-        print('Preprocessing file for month {0}...'.format(month))
-        df = dataframes.NAIS_Dataframe(
-            csv,
+        csvs = glob(self.root + '\\AIS*.csv')
+        self.df = dataframes.EDA_Dataframe(
+            csvs,
             self.lonMin,
             self.lonMax,
             self.latMin,
-            self.latMax,
-            self.stepSize
+            self.latMax
         )
 
-        df.clean()
+        self.df.clean_raw()
+        self.df.mark_enter_exit()
+        self.df.step_time()
+        self.df.mark_jump()
+        self.df.reorder_output()
+        
+    def preprocess_nais(self):
+        '''Add derived fields and validate data types.'''
+        csvs = glob(self.root + '\\AIS*.csv')
+        self.df = dataframes.NAIS_Dataframe(
+            csvs,
+            self.lonMin,
+            self.lonMax,
+            self.latMin,
+            self.latMax
+        )
+
+        self.df.simplify()
+        self.df.clean()
+        self.df.split_mmsi_stop()
+        self.df.add_evasive_data()
+        self.df.save_output()
